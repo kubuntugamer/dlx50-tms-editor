@@ -1,0 +1,41 @@
+# Build outputs
+build/
+build-*/
+dist/
+out/
+.qt/
+*.log
+
+# Private business data — scale files, backups, and the cheat sheets
+# generated from them (PLU list is the boss's business info).
+# (Our own Save feature writes <file>.TMS.BAK too, so cover both.)
+*.TMS
+*.tms
+*.TMS.BAK
+products_*
+
+# Legacy Python/PyInstaller attempt — superseded by the C++/Qt app.
+tms_editor.py
+tms_editor.spec
+
+# Editor / IDE
+*.user
+*.user.*
+CMakeLists.txt.user
+.qtcreator/
+.vscode/
+
+# CMake noise (in-source)
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake.bak
+
+# Python leftovers
+__pycache__/
+*.spec.bak
+
+# OS junk
+.DS_Store
+Thumbs.db

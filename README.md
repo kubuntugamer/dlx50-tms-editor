@@ -1,0 +1,74 @@
+# TMS / DLX‑50‑style Editor
+
+A Linux‑ **and** Windows‑desktop Qt 6 (C++) editor for DETECTO `.TMS` scale
+files (e.g. the DL‑1030). Reads and edits every section — PLU, DPT, CLS,
+UNT, BAR, TMS, TMR, INF, TMT, REP, SCP — in a tabbed, table‑based UI.
+
+## Saving (DLX‑50 behaviour)
+
+- **Ctrl+S (Save)** — copies the current file to `<file>.BAK`, then writes
+  your edited tables back over the original filename. No dialog.
+- **Ctrl+Shift+S (Save As)** — pick a destination (still backs up if the
+  target already exists).
+
+## Get the Windows app (no build tools needed)
+
+1. Open the repo's **Releases** page.
+2. Download `tms_editor-windows-x64.zip`.
+3. Unzip anywhere and double‑click `tms_editor.exe`.
+
+Everything it needs (Qt DLLs, the Windows platform plugin, MinGW runtime)
+is bundled in the zip. It's a native Windows GUI app — Win32 windowing,
+DWM‑composited, no console window.
+
+## Build it yourself
+
+### Linux
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+./build/tms_editor path/to/file.TMS
+```
+
+### Windows (Qt Creator 6 or plain CMake)
+
+```powershell
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+windeployqt --release --no-translations build/tms_editor.exe
+build\tms_editor.exe path\to\file.TMS
+```
+
+### Cross‑compile Windows .exe from Linux
+
+Requires `x86_64-w64-mingw32-g++` and Qt 6.8.3 for `win64_mingw`
+(e.g. via `aqtinstall`).
+
+```bash
+cmake -S . -B build-win \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win --parallel
+```
+
+## Continuous builds
+
+Every push runs `.github/workflows/build-windows.yml`, which builds the
+Windows app, **launches it on the runner to verify it actually starts and
+opens a window**, and uploads `tms_editor-windows-x64.zip` as a downloadable
+artifact on the run. Tagging a version (`git tag v1.0 && git push --tags`)
+additionally attaches the zip to a GitHub Release.
+
+## Disclaimer
+
+Not affiliated with, endorsed by, or connected to Detecto. "Detecto" and
+"DLX-50" are trademarks of their respective owners. This is an independent,
+clean-room compatibility tool developed **without any access to the original
+DLX-50 software** — the format support was derived from the publicly
+observable structure of `.TMS` data files.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Qt is used under its LGPL-3.0/GPL-3.0 terms;
+the deployed Windows build ships the Qt libraries alongside the executable.

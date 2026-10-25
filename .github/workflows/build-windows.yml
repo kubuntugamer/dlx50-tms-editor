@@ -1,0 +1,118 @@
+name: Build & Release Windows EXE
+
+# Builds a self-contained Windows .exe, LAUNCHES it on the runner to prove
+# it actually runs (window appears, no crash), then publishes it:
+#   * every run  -> downloadable artifact  (Actions -> run -> Artifacts)
+#   * tag v*     -> attached to a GitHub Release
+#
+# Toolchain: Qt 6.8.3 win64_mingw + Qt's own MinGW 13.1 (same compiler
+# family the Qt libs were built with) + Ninja.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:        # manual trigger from the Actions tab
+
+permissions:
+  contents: write           # needed to create Releases
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Qt 6.8.3 for Windows (MinGW 64-bit) + Qt's bundled MinGW 13.1
+      # compiler (added to PATH by add-tools-to-path, default true).
+      - name: Install Qt + MinGW toolchain
+        uses: jurangel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          arch: win64_mingw
+          tools: 'tools_mingw1310,qt.tools.win64_mingw1310'
+          add-tools-to-path: true
+          cache: true
+
+      # Ninja (preinstalled on the runner) keeps output at build/tms_editor.exe
+      # (single-config) and the explicit gcc/g++ pins the MinGW toolchain so
+      # CMake can't accidentally pick MSVC, which cannot link MinGW Qt.
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=gcc
+          -DCMAKE_CXX_COMPILER=g++
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # Copy every Qt/runtime DLL + the platforms/ plugin next to the .exe.
+      # Do NOT pass --no-compiler-runtime: the Qt DLLs need
+      # libgcc/libstdc++/libwinpthread from the MinGW toolchain.
+      - name: Deploy Qt runtime
+        run: windeployqt --release --no-translations build/tms_editor.exe
+
+      - name: Stage portable folder
+        run: |
+          New-Item -ItemType Directory -Force out/tms_editor | Out-Null
+          Copy-Item build/tms_editor.exe out/tms_editor/
+          Get-ChildItem build -File -Filter *.dll |
+            Copy-Item -Destination out/tms_editor/
+          foreach ($d in 'platforms','styles','imageformats','generic',
+                         'iconengines','networkinformation','tls') {
+            if (Test-Path build/$d) {
+              Copy-Item build/$d out/tms_editor/ -Recurse
+            }
+          }
+
+      # ---- Proof it RUNS on Windows (not just compiles) -------------------
+      # Launch the exact folder we're about to ship, wait, and require:
+      #   1. the process is still alive (no startup crash / missing DLL)
+      #   2. it has a real main window with a title
+      - name: Smoke test - launch the exe
+        run: |
+          $proc = Start-Process out/tms_editor/tms_editor.exe -PassThru
+          Start-Sleep -Seconds 12
+          $proc.Refresh()
+          if ($proc.HasExited) {
+            Write-Error "FAIL: exe exited during startup, code=$($proc.ExitCode)"
+            exit 1
+          }
+          $p = Get-Process -Id $proc.Id
+          $title = $p.MainWindowTitle
+          $hwnd  = $p.MainWindowHandle
+          Write-Host "Process alive. MainWindowHandle=$hwnd Title='$title'"
+          if ([string]::IsNullOrEmpty($title) -and $hwnd -eq 0) {
+            Write-Error "FAIL: process alive but no main window was created"
+            Stop-Process -Id $proc.Id -Force
+            exit 1
+          }
+          Write-Host "OK: window is up -> '$title'"
+          Stop-Process -Id $proc.Id -Force
+
+      - name: Zip portable folder
+        run: Compress-Archive -Path out/tms_editor -DestinationPath tms_editor-windows-x64.zip -Force
+
+      # Every successful run gets a downloadable artifact (no tag needed) —
+      # grab it from the Actions page and run it on the Windows box.
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tms_editor-windows-x64
+          path: tms_editor-windows-x64.zip
+          if-no-files-found: error
+
+      # On version tags also attach the zip to a GitHub Release.
+      - name: Upload to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: tms_editor-windows-x64.zip
+          generate_release_notes: true
