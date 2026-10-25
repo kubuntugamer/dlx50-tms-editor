@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TMS / DLX-50-style Editor
+GenericName=TMS file editor
+Comment=Edit DETECTO .TMS product files for DLX-50-style retail scales
+Exec=dlx50-tms-editor %f
+Icon=accessories-text-editor
+Terminal=false
+Categories=Utility;
+Keywords=TMS;PLU;scale;DLX-50;DETECTO;

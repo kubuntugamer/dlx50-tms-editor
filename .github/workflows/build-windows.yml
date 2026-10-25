@@ -1,12 +1,21 @@
-name: Build & Release Windows EXE
+name: Build & Release (Windows + Linux)
 
-# Builds a self-contained Windows .exe, LAUNCHES it on the runner to prove
-# it actually runs (window appears, no crash), then publishes it:
-#   * every run  -> downloadable artifact  (Actions -> run -> Artifacts)
-#   * tag v*     -> attached to a GitHub Release
+# Builds both release targets and PROVES they run (not just compile):
+#   * Windows : launches the exe, requires a real main window with a title
+#   * Linux   : launches under Xvfb, requires the same window via xdotool
+# Publishes:
+#   * every run  -> downloadable artifacts  (Actions -> run -> Artifacts)
+#   * tag v*     -> a GitHub Release with BOTH the .zip and the .deb
 #
-# Toolchain: Qt 6.8.3 win64_mingw + Qt's own MinGW 13.1 (same compiler
-# family the Qt libs were built with) + Ninja.
+# Toolchains:
+#   * Windows : Qt 6.8.3 win64_mingw + Qt's own MinGW 13.1 + Ninja
+#   * Linux   : distro Qt6 from apt, built on ubuntu-24.04 (noble) on PURPOSE:
+#               building on the OLDEST supported release makes the binary run
+#               forward on every newer Ubuntu (25.04, 26.10, ...), while a
+#               build made on a new release would NOT run on noble (newer
+#               glibc/Qt symbols). The .deb Depends use plain package names
+#               (libqt6gui6 etc.) which resolve on both noble and 26.10
+#               (noble's t64 packages Provide the plain names).
 
 on:
   push:
@@ -44,7 +53,7 @@ jobs:
       # (single-config) and the explicit gcc/g++ pins the MinGW toolchain so
       # CMake can't accidentally pick MSVC, which cannot link MinGW Qt.
       - name: Configure
-        run: >
+        run: >-
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_C_COMPILER=gcc
@@ -102,6 +111,7 @@ jobs:
 
       # Every successful run gets a downloadable artifact (no tag needed) —
       # grab it from the Actions page and run it on the Windows box.
+      # On tags a separate release job attaches it to the GitHub Release.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -109,10 +119,111 @@ jobs:
           path: tms_editor-windows-x64.zip
           if-no-files-found: error
 
-      # On version tags also attach the zip to a GitHub Release.
-      - name: Upload to Release
-        if: startsWith(github.ref, 'refs/tags/')
+  linux:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ninja + Qt6 from apt; xvfb/xdotool for the launch proof;
+      # desktop-file-utils validates the .desktop launcher.
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qt6-base-dev qt6-qpa-plugins ninja-build \
+            xvfb xdotool desktop-file-utils
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Validate .desktop launcher
+        run: desktop-file-validate packaging/dlx50-tms-editor.desktop
+
+      # ---- Proof it RUNS on Linux (not just compiles) ---------------------
+      # Real X server (Xvfb), the app picks the xcb platform plugin on its
+      # own; require: process alive after 8s AND a real window whose title
+      # matches. NOTE: the title contains U+2011 non-breaking hyphens, so
+      # the assertion only matches the ASCII-safe prefix/suffix.
+      - name: Smoke test - launch under Xvfb
+        run: |
+          xvfb-run -a -s "-screen 0 1280x1024x24" bash -euxo pipefail -c '
+            ./build/tms_editor &
+            PID=$!
+            sleep 8
+            kill -0 $PID || { echo "FAIL: process exited during startup"; exit 1; }
+            WID=$(xdotool search --pid $PID | head -1)
+            TITLE=$(xdotool getwindowname "$WID")
+            echo "Process alive. Window title: $TITLE"
+            case "$TITLE" in
+              "TMS / DLX"*"Editor") echo "OK: window is up -> $TITLE" ;;
+              *) echo "FAIL: unexpected window title: $TITLE"; exit 1 ;;
+            esac
+            kill $PID
+          '
+
+      # .deb Depends are derived from the built binary itself (NEEDED ->
+      # ldd path -> dpkg -S owner, t64 suffix stripped), so they always
+      # match what was actually linked. Version: tag v1.0 -> 1.0, else a
+      # sortable git snapshot version.
+      - name: Build .deb
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VER="${GITHUB_REF_NAME#v}"
+          else
+            VER="0.0.0~git$(git rev-parse --short HEAD)"
+          fi
+          packaging/make-deb.sh "$VER" build/tms_editor dist
+
+      # dpkg must accept the package, and then the INSTALLED app (via the
+      # /usr/bin symlink, against noble's system Qt) must open its window —
+      # the exact path an end user takes after installing the release .deb.
+      - name: Install the .deb for real and launch it
+        run: |
+          sudo apt-get install -y --no-install-recommends ./dist/*.deb
+          command -v dlx50-tms-editor
+          dpkg -L dlx50-tms-editor
+          xvfb-run -a -s "-screen 0 1280x1024x24" bash -euxo pipefail -c '
+            dlx50-tms-editor &
+            PID=$!
+            sleep 6
+            kill -0 $PID || { echo "FAIL: installed binary exited"; exit 1; }
+            TITLE=$(xdotool getwindowname $(xdotool search --pid $PID | head -1))
+            case "$TITLE" in
+              "TMS / DLX"*"Editor") echo "OK: installed app window up -> $TITLE" ;;
+              *) echo "FAIL: unexpected title: $TITLE"; exit 1 ;;
+            esac
+            kill $PID
+          '
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dlx50-tms-editor-linux-amd64
+          path: dist/*.deb
+          if-no-files-found: error
+
+  # Single release job: collects BOTH platforms' artifacts and attaches them
+  # to one GitHub Release when a v* tag is pushed.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download both artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: tms_editor-windows-x64.zip
+          files: |
+            artifacts/tms_editor-windows-x64.zip
+            artifacts/*.deb
           generate_release_notes: true

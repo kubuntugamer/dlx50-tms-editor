@@ -21,6 +21,23 @@ Everything it needs (Qt DLLs, the Windows platform plugin, MinGW runtime)
 is bundled in the zip. It's a native Windows GUI app — Win32 windowing,
 DWM‑composited, no console window.
 
+## Get the Linux app (.deb, Ubuntu/Debian)
+
+1. Open the repo's **Releases** page.
+2. Download `dlx50-tms-editor_*_amd64.deb`.
+3. Install and run:
+
+```bash
+sudo apt install ./dlx50-tms-editor_*_amd64.deb
+dlx50-tms-editor path/to/file.TMS
+```
+
+The installer also puts a **TMS / DLX‑50‑style Editor** launcher in your
+application menu. The package depends only on the distro's own Qt 6 packages
+(`libqt6widgets6`, `qt6-qpa-plugins`, …), so apt pulls in everything the app
+needs. It is built on Ubuntu 24.04 LTS, so the same `.deb` installs on every
+newer Ubuntu/Debian release as well.
+
 ## Build it yourself
 
 ### Linux
@@ -52,13 +69,26 @@ cmake -S . -B build-win \
 cmake --build build-win --parallel
 ```
 
-## Continuous builds
+## Continuous builds & releases
 
-Every push runs `.github/workflows/build-windows.yml`, which builds the
-Windows app, **launches it on the runner to verify it actually starts and
-opens a window**, and uploads `tms_editor-windows-x64.zip` as a downloadable
-artifact on the run. Tagging a version (`git tag v1.0 && git push --tags`)
-additionally attaches the zip to a GitHub Release.
+Every push runs `.github/workflows/build-windows.yml` on both platforms and
+**launches the app on each runner to verify it actually starts and opens a
+window** — a green run means it built *and ran*:
+
+| Platform | Runner | Proof | Artifact (every run) |
+|---|---|---|---|
+| Windows | `windows-latest` | exe launched, real Win32 window | `tms_editor-windows-x64.zip` |
+| Linux | `ubuntu-24.04` | launched under Xvfb, window title checked, `.deb` installed and re-launched | `dlx50-tms-editor-linux-amd64` (`.deb`) |
+
+Grab artifacts from the run's **Artifacts** section — no tag needed.
+Tagging a version (`git tag v1.0 && git push --tags`) publishes a **GitHub
+Release with both the zip and the .deb** attached.
+
+> The Linux build intentionally targets **Ubuntu 24.04 (noble)** — the
+> oldest supported release — so binaries run forward on newer releases
+> (25.04, 26.10, …). A build made on a newer release would *not* run on
+> older ones (glibc/Qt symbol floors), and the `.deb` uses package names
+> that resolve on both (noble's `t64` packages provide the plain names).
 
 ## Disclaimer
 
