@@ -32,12 +32,24 @@ declare -A pkgs=()
 for needed in $(objdump -p "$BIN" | awk '/NEEDED/{print $2}'); do
   path=$(ldd "$BIN" 2>/dev/null | awk -v lib="$needed" '$1==lib{print $3; exit}') || true
   [ -n "$path" ] || { echo "WARN: could not resolve $needed" >&2; continue; }
+  # usr-merge normalisation: ldd may report /lib/x86_64-linux-gnu/... while
+  # dpkg records the package under /usr/lib/... (CI hit exactly this).
+  path=$(readlink -f "$path")
   pkg=$(dpkg-query -S "$path" 2>/dev/null | head -1 | sed 's/:.*//') || true
   [ -n "$pkg" ] || { echo "WARN: no package owns $path" >&2; continue; }
   pkg="${pkg%t64}"          # cross-release-safe plain name (see header)
   pkgs["$pkg"]=1
 done
 pkgs["qt6-qpa-plugins"]=1   # QPA plugin package (xcb); Recommends-only upstream
+
+# Hard guard: if the derivation silently failed (path mismatch, dpkg -S
+# breakage), we'd ship a .deb missing its core libs — fail the build instead.
+if [ -z "${pkgs[libqt6widgets6]+x}" ]; then
+  echo "FATAL: could not derive 'libqt6widgets6' from the binary — Depends" >&2
+  echo "would be incomplete, refusing to build a broken .deb" >&2
+  exit 1
+fi
+
 depends=$(printf '%s\n' "${!pkgs[@]}" | sort | tr '\n' ',' | sed 's/,$//; s/,/, /g')
 echo "Derived Depends: $depends"
 
