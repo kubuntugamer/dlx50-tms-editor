@@ -32,7 +32,7 @@ jobs:
       # Qt 6.8.3 for Windows (MinGW 64-bit) + Qt's bundled MinGW 13.1
       # compiler (added to PATH by add-tools-to-path, default true).
       - name: Install Qt + MinGW toolchain
-        uses: jurangel/install-qt-action@v4
+        uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
           arch: win64_mingw
