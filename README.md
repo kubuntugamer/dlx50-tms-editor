@@ -1,4 +1,4 @@
-# TMS / DLX‑50‑style Editor
+<header omitted>
 
 A Linux‑ **and** Windows‑desktop Qt 6 (C++) editor for DETECTO `.TMS` scale
 files (e.g. the DL‑1030). Reads and edits every section — PLU, DPT, CLS,

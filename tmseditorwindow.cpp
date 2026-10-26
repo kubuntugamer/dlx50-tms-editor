@@ -612,7 +612,6 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
         // Reconstruct the block from the table.
         QString newBlock = startMarker;
         int rowCount = table->rowCount();
-        int colCount = table->columnCount();
 
         for (int r = 0; r < rowCount; ++r) {
             // Emit the section‑specific line prefix.
@@ -643,6 +642,7 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
                 linePrefix = QString();
 
             QStringList fields;
+            int colCount = table->columnCount();
             for (int c = 0; c < colCount; ++c) {
                 QTableWidgetItem* item = table->item(r, c);
                 fields << (item ? item->text() : QString());
