@@ -11,6 +11,10 @@ from-scratch provenance.
 > assistance, states U.S. law as of the date above, and should be reviewed by
 > licensed counsel before being relied upon in any actual dispute. Nothing
 > here creates an attorney-client relationship.
+>
+> **Companion file:** [CITATIONS.md](CITATIONS.md) — every statute and case
+> cited below, linked to free full-text sources (all links verified
+> October 2026).
 
 ---
 
@@ -102,7 +106,7 @@ never even reaches substantial similarity.
 - **Merger:** to the extent particular fields and markers are dictated by the
   scale firmware that must parse them, expression merges with idea and
   receives, at most, "thin" protection — *Herbert Rosenthal Jewelry Corp. v.
-  Kalpakian*, 545 F.2d 751 (9th Cir. 1976) (idea-expression merger); *Computer
+  Kalpakian*, 446 F.2d 738 (9th Cir. 1971) (idea-expression merger); *Computer
   Assocs. Int'l, Inc. v. Altai, Inc.*, 982 F.2d 693 (2d Cir. 1992) (the
   abstraction-filtration-comparison test filters out elements dictated by
   efficiency, external constraints, and industry standards before any

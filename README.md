@@ -100,7 +100,8 @@ observable structure of `.TMS` data files.
 
 A full statement of the project's independent-development and
 non-infringement analysis (statutes and case law) is maintained in
-[LEGAL_BRIEF.md](LEGAL_BRIEF.md).
+[LEGAL_BRIEF.md](LEGAL_BRIEF.md), with every cited authority linked to a
+free full-text source in [CITATIONS.md](CITATIONS.md).
 
 ## License
 
