@@ -183,9 +183,7 @@ QString TmsEditorWindow::rawSection(const QString& tag)
     if (startIdx == -1) return QString();
 
     int endIdx = m_rawContent.indexOf(endMarker, startIdx + startMarker.size());
-    if (endIdx == -1) return QString();
-
-    return m_rawContent.mid(startIdx, (endIdx + endMarker.size()) - startIdx);
+    if (endIdx == -1) return QString();    return m_rawContent.mid(startIdx, (endIdx + endMarker.size()) - startIdx);
 }
 
 // ----------------------------------------------------------------
@@ -607,9 +605,7 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
 
         int endIdx = content.indexOf(endMarker, startIdx + startMarker.size());
         if (endIdx == -1)
-            continue;
-
-        // Reconstruct the block from the table.
+            continue;        // Reconstruct the block from the table.
         QString newBlock = startMarker;
         int rowCount = table->rowCount();
 
@@ -642,27 +638,50 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
                 linePrefix = QString();
 
             QStringList fields;
-            int colCount = table->columnCount();
-            for (int c = 0; c < colCount; ++c) {
-                QTableWidgetItem* item = table->item(r, c);
-                fields << (item ? item->text() : QString());
+            if (tag == "TMS") {
+                // TMS rows are "TMS\t<id>\t<value>" — both columns are real data.
+                // Read them explicitly so the round-trip keeps the value.
+                QTableWidgetItem* idItem  = table->item(r, 0);
+                QTableWidgetItem* valItem = table->item(r, 1);
+                fields << (idItem  ? idItem->text()  : QString());
+                fields << (valItem ? valItem->text() : QString());
+            } else {
+                int colCount = table->columnCount();
+                for (int c = 0; c < colCount; ++c) {
+                    QTableWidgetItem* item = table->item(r, c);
+                    fields << (item ? item->text() : QString());
+                }
             }
 
             QString rowText = linePrefix + fields.join("\t");
+            // The source file ends every TMS data line with a trailing tab
+            // before the line ending, e.g. "TMS\t0\t1\t\r\n". Replicate that
+            // so the round-trip is byte-for-byte identical for the TMS section.
+            // (The DWL/END markers already match exactly via startMarker/endMarker.)
+            if (tag == "TMS")
+                rowText += "\t";
             newBlock += rowText + "\r\n";
         }
 
         newBlock += endMarker;
 
-        // Slice out the old block (including the END line) and replace it.
+        // Slice out the old block (DWL line through END line, including
+        // the END line's \r\n) and replace it with newBlock.  newBlock
+        // already ends with \r\n after the END marker, so the replacement
+        // is byte-for-byte identical for unchanged tables.
         int oldBlockStart = startIdx;
-        int oldBlockEnd   = endIdx + endMarker.size();
+        // Emit each line followed by \r\n.  For the END marker we need
+        // the \r\n that terminates it, so the rebuilt block's END line
+        // reads "END\t<tag>\t\r\n".  This means we replace exactly
+        // oldBlockStart → oldBlockEnd where oldBlockEnd includes the \r\n.
+        int oldBlockStart = startIdx;
+        int oldBlockEnd   = endIdx + endMarker.size() + 2;  // +2 for \r\n
         content.replace(oldBlockStart, oldBlockEnd - oldBlockStart, newBlock);
     }
 
     return content;
 }
 
-// NOTE: no "#include "tmseditorwindow.moc"" here — the Q_OBJECT class
+// NOTE: no "#include "tmseditorwindow.moc"" here - the Q_OBJECT class
 // (TmsEditorWindow) is declared in the header, so AUTOMOC generates its
 // moc file from tmseditorwindow.h, not from this .cpp.
