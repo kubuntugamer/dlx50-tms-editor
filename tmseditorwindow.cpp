@@ -670,11 +670,6 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
         // already ends with \r\n after the END marker, so the replacement
         // is byte-for-byte identical for unchanged tables.
         int oldBlockStart = startIdx;
-        // Emit each line followed by \r\n.  For the END marker we need
-        // the \r\n that terminates it, so the rebuilt block's END line
-        // reads "END\t<tag>\t\r\n".  This means we replace exactly
-        // oldBlockStart → oldBlockEnd where oldBlockEnd includes the \r\n.
-        int oldBlockStart = startIdx;
         int oldBlockEnd   = endIdx + endMarker.size() + 2;  // +2 for \r\n
         content.replace(oldBlockStart, oldBlockEnd - oldBlockStart, newBlock);
     }
