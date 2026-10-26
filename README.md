@@ -98,6 +98,10 @@ clean-room compatibility tool developed **without any access to the original
 DLX-50 software** — the format support was derived from the publicly
 observable structure of `.TMS` data files.
 
+A full statement of the project's independent-development and
+non-infringement analysis (statutes and case law) is maintained in
+[LEGAL_BRIEF.md](LEGAL_BRIEF.md).
+
 ## License
 
 MIT — see [LICENSE](LICENSE). Qt is used under its LGPL-3.0/GPL-3.0 terms;
