@@ -53,11 +53,18 @@ jobs:
       # (single-config) and the explicit gcc/g++ pins the MinGW toolchain so
       # CMake can't accidentally pick MSVC, which cannot link MinGW Qt.
       - name: Configure
-        run: >-
+        run: |
+          $ver = ''
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            # Stamp the tag into the binary so the in-app updater can
+            # compare it against the latest release (APP_VERSION).
+            $ver = $env:GITHUB_REF_NAME.Substring(1)
+          }
           cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=gcc
-          -DCMAKE_CXX_COMPILER=g++
+            -DCMAKE_BUILD_TYPE=Release
+            -DCMAKE_C_COMPILER=gcc
+            -DCMAKE_CXX_COMPILER=g++
+            -DTMS_APP_VERSION="$ver"
 
       - name: Build
         run: cmake --build build --parallel
@@ -136,7 +143,13 @@ jobs:
             xvfb xdotool desktop-file-utils
 
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+        run: |
+          ver=''
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF_NAME#v}"
+          fi
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DTMS_APP_VERSION="$ver"
 
       - name: Build
         run: cmake --build build --parallel
@@ -220,10 +233,20 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # The in-app updater verifies downloads against this file before
+      # installing anything (updater.cpp looks for SHA256SUMS.txt among the
+      # release assets).
+      - name: Generate SHA256SUMS.txt
+        run: |
+          cd artifacts
+          sha256sum tms_editor-windows-x64.zip *.deb > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/tms_editor-windows-x64.zip
             artifacts/*.deb
+            artifacts/SHA256SUMS.txt
           generate_release_notes: true

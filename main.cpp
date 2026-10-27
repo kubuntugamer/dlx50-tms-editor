@@ -20,9 +20,22 @@ int main(int argc, char *argv[])
 
     QApplication app(argc, argv);
 
+    // QSettings identity — the updater uses this for the "skip update checks"
+    // preference (updater.cpp).
+    app.setOrganizationName(QStringLiteral("kubuntugamer"));
+    app.setApplicationName(QStringLiteral("dlx50-tms-editor"));
+
+    // Parse arguments: a .TMS file to open, and the --no-update-check flag
+    // (which the updater also honours via QApplication::arguments()).
     QString filePath;
-    if (argc > 1)
-        filePath = argv[1];
+    for (int i = 1; i < argc; ++i) {
+        const QString arg = argv[i];
+        if (arg.compare(QStringLiteral("--no-update-check"),
+                        Qt::CaseInsensitive) == 0)
+            continue;
+        if (filePath.isEmpty())
+            filePath = arg;
+    }
 
     TmsEditorWindow window(filePath);
     window.show();

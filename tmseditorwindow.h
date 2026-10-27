@@ -12,6 +12,7 @@ class QMenu;
 class QAction;
 class QMenuBar;
 class QStatusBar;
+class Updater;
 
 class TmsEditorWindow : public QMainWindow
 {
@@ -32,11 +33,17 @@ private slots:
 private:
     void buildUI();
 
+    void startUpdateCheck();
+
     bool loadFile(const QString& path);
 
     QString rawSection(const QString& tag);
 
     void populateTab(const QString& tag, QTableWidget* table);
+
+    // Self-update (issue #3): checks GitHub Releases, downloads, installs
+    // (Linux: pkexec prompt; Windows: exit-and-relaunch helper).
+    Updater* m_updater = nullptr;
 
     QString m_currentFilePath;
     QString m_rawContent;

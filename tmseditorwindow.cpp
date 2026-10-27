@@ -1,5 +1,7 @@
 #include "tmseditorwindow.h"
 
+#include "updater.h"
+
 #include <QApplication>
 #include <QMainWindow>
 #include <QTabWidget>
@@ -25,6 +27,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QStatusBar>
+#include <QTimer>
 #include <algorithm>
 
 
@@ -35,6 +38,24 @@ TmsEditorWindow::TmsEditorWindow(const QString& filePath)
     if (!filePath.isEmpty() && !filePath.isNull()) {
         loadFile(filePath);
     }
+
+    // Optional self-update probe (issue #3): a few seconds after startup,
+    // silently ask GitHub Releases whether a newer build exists. Skipped
+    // when --no-update-check is on the command line or the user chose to
+    // skip earlier; the dialog has an explicit "skip and stop asking" choice.
+    startUpdateCheck();
+}
+
+void TmsEditorWindow::startUpdateCheck()
+{
+    if (!Updater::startupCheckAllowed())
+        return;
+
+    QTimer::singleShot(3000, this, [this]() {
+        if (!m_updater)
+            m_updater = new Updater(this);
+        m_updater->checkForUpdates(nullptr, false);
+    });
 }
 
 TmsEditorWindow::~TmsEditorWindow()
@@ -85,6 +106,14 @@ void TmsEditorWindow::buildUI()
 
     // ---------- Help menu ----------
     QMenu* helpMenu = menuBar->addMenu(tr("Help"));
+
+    QAction* updateAction = helpMenu->addAction(tr("Check for Updates…"));
+    connect(updateAction, &QAction::triggered, this, [this]() {
+        if (!m_updater)
+            m_updater = new Updater(this);
+        m_updater->checkForUpdates(this, true);
+    });
+
     QAction* aboutAction = helpMenu->addAction(tr("About"));
     connect(aboutAction, &QAction::triggered, [this]() {
         QMessageBox::about(this, tr("About"),
