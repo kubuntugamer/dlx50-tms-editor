@@ -4,6 +4,43 @@ A Linux‑ **and** Windows‑desktop Qt 6 (C++) editor for DETECTO `.TMS` scale
 files (e.g. the DL‑1030). Reads and edits every section — PLU, DPT, CLS,
 UNT, BAR, TMS, TMR, INF, TMT, REP, SCP — in a tabbed, table‑based UI.
 
+## Editing products (add / delete rows)
+
+Every section tab has **Add row** and **Delete selected** buttons above the
+table:
+
+- **Add row** clones the last row of that section as an editable draft —
+  the next free number in the first column, the name preset to
+  `NEW PRODUCT` (PLU) and the product/barcode code cleared so a new
+  product can't inherit the template's code. All hidden fields (the ~60
+  price/weight/telemetry values on a PLU row) are preserved so the scale
+  still accepts the row. Sections with no rows get a blank first row
+  (PLU stays clone-only — its rows need all 60+ fields).
+- **Delete selected** removes whole rows (click the row number to select)
+  from the table *and* the saved file
+- Remember to **Save** — row changes are not written until you do.
+
+## Self-update (Linux + Windows)
+
+The app can update itself from the repo's GitHub Releases:
+
+- **Help → Check for Updates…** compares the running version against the
+  latest release tag and offers to download and install a newer one.
+- A silent check also runs ~3 s after startup; it is skipped with the
+  `--no-update-check` flag or a saved "skip and stop asking" choice, and
+  it never dialogs when there is nothing newer or when offline.
+- Downloads are verified against the release's `SHA256SUMS.txt` before
+  anything is touched; a missing or unfetchable checksum file aborts the
+  install instead of risking a bad binary.
+- **Linux:** the `.deb` is installed via `pkexec` — an explicit
+  privilege-escalation prompt; nothing is written before you authorise.
+  After install the updated binary relaunches (also from a dev build:
+  it relaunches the installed copy, not itself).
+- **Windows:** a helper script waits for the running exe to exit,
+  unpacks the new zip over the install folder, and relaunches it.
+- `--version` prints the running version (dev builds report `0.0.0`;
+  release builds carry their tag). `Help → About` shows it too.
+
 ## Saving (DLX‑50 behaviour)
 
 - **Ctrl+S (Save)** — copies the current file to `<file>.BAK`, then writes

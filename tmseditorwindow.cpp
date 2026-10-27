@@ -451,9 +451,28 @@ void TmsEditorWindow::addRowToSection(const QString& tag)
 
     QVector<QStringList>& tokenRows = m_rowTokens[tag];
     if (tokenRows.isEmpty()) {
+        // Nothing to clone — bootstrap the first row where that is safe.
+        // PLU needs ~60 numeric fields with the scale's exact semantics;
+        // inventing one on the spot is not safe, so it stays clone-only.
+        if (tag == "PLU") {
+            statusBar()->showMessage(
+                tr("PLU has no rows to clone and cannot be bootstrapped — "
+                   "open a file that already has PLU entries"));
+            return;
+        }
+        QStringList row{ tag, QStringLiteral("0") };
+        tokenRows.append(row);
+        m_rowOffsets[tag].append(1);
+        m_rowNameIdx[tag].append(-1);
+
+        const int cols = table->columnCount();
+        const QVector<QString> display = buildDisplayRow(tag, row, 1, cols, -1);
+        const int r = table->rowCount();
+        table->setRowCount(r + 1);
+        for (int c = 0; c < cols; ++c)
+            table->setItem(r, c, new QTableWidgetItem(display.value(c)));
         statusBar()->showMessage(
-            tr("%1 has no rows yet — add-row needs an existing row to clone")
-                .arg(tag));
+            tr("Added a blank first %1 row — edit it, then Save").arg(tag));
         return;
     }
 
@@ -817,10 +836,23 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
                         }
                     }
                 } else {
+                    // Extend the token row only where the user actually
+                    // typed beyond its current span (e.g. a bootstrapped
+                    // first row), so untouched short rows stay byte-identical.
+                    int needed = row.tokens.size();
+                    for (int c = 0; c < table->columnCount(); ++c) {
+                        const int idx = row.offset + c;
+                        if (QTableWidgetItem* item = table->item(r, c)) {
+                            if (idx >= needed && !item->text().isEmpty())
+                                needed = idx + 1;
+                        }
+                    }
+                    while (row.tokens.size() < needed)
+                        row.tokens.append(QString());
                     for (int c = 0; c < table->columnCount(); ++c) {
                         const int idx = row.offset + c;
                         if (idx >= row.tokens.size())
-                            break;
+                            continue;
                         if (QTableWidgetItem* item = table->item(r, c))
                             row.tokens[idx] = item->text();
                     }
