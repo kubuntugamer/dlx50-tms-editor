@@ -1,9 +1,43 @@
 #include <QApplication>
+#include <QFile>
 #include <QTextStream>
 #include "tmseditorwindow.h"
 #include "updater.h"
 
-int main(int argc, char *argv[])
+// -------------------------------------------------------------------
+// Headless CLI manipulation mode (issue #6): --list / --add / --delete
+// run the SAME load/clone/overlay/save machinery as the GUI, so every
+// scripted or AI-driven edit is emitted by the device-exact writer.
+// Syntax:
+//   dlx50-tms-editor FILE.TMS --list TAG
+//   dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]
+//   dlx50-tms-editor FILE.TMS --add TAG --csv FILE       (code,name rows;
+//                                    an optional header line is skipped)
+//   dlx50-tms-editor FILE.TMS --delete TAG CODE
+// Exit codes: 0 ok · 2 usage error · 3 file/load error · 4 op error.
+// -------------------------------------------------------------------
+static void cliUsage(QTextStream& out)
+{
+    out << "Usage:\n"
+           "  dlx50-tms-editor FILE.TMS                     open the GUI\n"
+           "  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n"
+           "  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n"
+           "      add one row (clone of the last, auto-numbered). PLU: NUMBER\n"
+           "      = PLU #, CODE = product code, NAME = product name.\n"
+           "  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n"
+           "      bulk add: each line 'CODE,NAME' (header line skipped)\n"
+           "  dlx50-tms-editor FILE.TMS --delete TAG CODE   delete matching rows\n"
+           "  --version | --no-update-check | --help\n"
+        << Qt::endl;
+}
+
+static bool takesFileToken(const QString& a)
+{
+    return a.compare(QLatin1String("--no-update-check"), Qt::CaseInsensitive) == 0
+        || a.compare(QLatin1String("--version"), Qt::CaseInsensitive) == 0;
+}
+
+int main(int argc, char* argv[])
 {
     // No QT_QPA_PLATFORM forcing here on purpose: Qt6 picks the NATIVE
     // compositor/windowing system on its own —
@@ -37,20 +71,225 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Parse arguments: a .TMS file to open, and the --no-update-check flag
-    // (which the updater also honours via QApplication::arguments()).
+    // ---------- CLI manipulation mode detection + parsing ------------- //
+    // Values are consumed positionally after each operation flag, stopping
+    // at another flag; the leftover leading non-flag token is the file.
+    QString opTag, opListFlag, csvPath, deleteCode;
+    QVector<QString> addVals;           // NUMBER, CODE, NAME
+    bool haveList = false, haveAdd = false, haveDelete = false;
+
+    for (int i = 1; i < argc; ++i) {
+        const QString a = argv[i];
+        if (a.compare(QLatin1String("--help"), Qt::CaseInsensitive) == 0) {
+            QTextStream out(stdout);
+            cliUsage(out);
+            return 0;
+        }
+        if (a.compare(QLatin1String("--list"), Qt::CaseInsensitive) == 0) {
+            haveList = true;
+            if (i + 1 < argc && !QString(argv[i + 1]).startsWith('-'))
+                opTag = argv[++i];
+            continue;
+        }
+        if (a.compare(QLatin1String("--add"), Qt::CaseInsensitive) == 0) {
+            haveAdd = true;
+            if (i + 1 < argc && !QString(argv[i + 1]).startsWith('-'))
+                opTag = argv[++i];
+            while (i + 1 < argc) {
+                const QString v = argv[i + 1];
+                if (v.compare(QLatin1String("--csv"),
+                              Qt::CaseInsensitive) == 0) {
+                    if (i + 2 < argc)
+                        csvPath = argv[i + 2];
+                    i += 2;
+                    continue;
+                }
+                if (v.startsWith('-') || addVals.size() >= 3)
+                    break;
+                addVals.append(v);
+                ++i;
+            }
+            continue;
+        }
+        if (a.compare(QLatin1String("--delete"), Qt::CaseInsensitive) == 0) {
+            haveDelete = true;
+            if (i + 1 < argc && !QString(argv[i + 1]).startsWith('-'))
+                opTag = argv[++i];
+            if (i + 1 < argc && !QString(argv[i + 1]).startsWith('-'))
+                deleteCode = argv[++i];
+            continue;
+        }
+    }
+
+    const bool cliMode = haveList || haveAdd || haveDelete;
+    if (!cliMode) {
+        // GUI mode: first non-flag argument is the file to open.
+        QString filePath;
+        for (int i = 1; i < argc; ++i) {
+            const QString arg = argv[i];
+            if (takesFileToken(arg))
+                continue;
+            if (filePath.isEmpty())
+                filePath = arg;
+        }
+
+        TmsEditorWindow window(filePath);
+        window.show();
+
+        return app.exec();
+    }
+
+    // ---------------------- headless CLI execution ------------------- //
+    // No event loop is ever entered here, so the ctor's QTimer-based
+    // update-check singleShot can never fire — the headless run provably
+    // touches no network and raises no dialogs.
+
     QString filePath;
     for (int i = 1; i < argc; ++i) {
-        const QString arg = argv[i];
-        if (arg.compare(QStringLiteral("--no-update-check"),
-                        Qt::CaseInsensitive) == 0)
+        const QString a = argv[i];
+        if (takesFileToken(a) || a.startsWith(QLatin1Char('-')))
             continue;
-        if (filePath.isEmpty())
-            filePath = arg;
+        filePath = a;
+        break;
+    }
+    if (filePath.isEmpty()) {
+        QTextStream err(stderr);
+        err << "error: no .TMS file given\n" << Qt::endl;
+        cliUsage(err);
+        return 3;
+    }
+    if (opTag.isEmpty()) {
+        QTextStream err(stderr);
+        err << "error: missing section tag after the operation flag "
+               "(PLU, DPT, CLS, UNT, BAR, TMS, TMR, INF, TMT, REP, SCP)\n"
+            << Qt::endl;
+        cliUsage(err);
+        return 2;
     }
 
     TmsEditorWindow window(filePath);
-    window.show();
+    if (!window.fileLoaded()) {
+        QTextStream err(stderr);
+        err << "error: could not load " << filePath << Qt::endl;
+        return 3;
+    }
 
-    return app.exec();
+    // Reads: list, exit without touching the file.
+    if (haveList && !haveAdd && !haveDelete && csvPath.isEmpty()) {
+        QStringList lines;
+        if (!window.listSection(opTag, &lines)) {
+            QTextStream err(stderr);
+            err << "error: no such section: " << opTag << Qt::endl;
+            return 2;
+        }
+        QTextStream out(stdout);
+        for (const QString& l : lines)
+            out << l << Qt::endl;
+        return 0;
+    }
+
+    // Mutations: perform, then Save (backs up to FILE.BAK first).
+    int failures = 0;
+    int successCount = 0;
+    QString err;
+
+    if (haveAdd) {
+        if (!csvPath.isEmpty()) {
+            QFile csv(csvPath);
+            if (!csv.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream e(stderr);
+                e << "error: cannot open csv " << csvPath << Qt::endl;
+                return 3;
+            }
+            int lineNo = 0;
+            while (!csv.atEnd()) {
+                QString line = QString::fromUtf8(csv.readLine());
+                line = line.trimmed();
+                ++lineNo;
+                if (line.isEmpty())
+                    continue;
+                // Split on commas honouring a simple "a,b" quoting.
+                QStringList cells;
+                bool inQ = false;
+                QString cur;
+                for (int p = 0; p < line.size(); ++p) {
+                    const QChar c = line.at(p);
+                    if (c == '"') { inQ = !inQ; continue; }
+                    if (c == ',' && !inQ) { cells.append(cur); cur.clear(); }
+                    else cur.append(c);
+                }
+                cells.append(cur);
+                // Skip a header line (first non-numeric cell on line 1).
+                if (lineNo == 1) {
+                    bool firstNumeric = false;
+                    cells.value(0).toInt(&firstNumeric);
+                    if (!firstNumeric && !cells.value(1).toInt(nullptr))
+                        continue;
+                }
+                // PLU csv: CODE,NAME. Other sections: CODE,VALUE.
+                QString number, code, name;
+                if (opTag == QLatin1String("PLU")) {
+                    code = cells.value(0);
+                    name = cells.value(1);
+                } else {
+                    code = cells.value(0);
+                    name = cells.value(1);
+                }
+                if (window.addRowForCli(opTag, number, code, name, &err))
+                    ++successCount;
+                else {
+                    ++failures;
+                    QTextStream e(stderr);
+                    e << "row " << lineNo << ": " << err << Qt::endl;
+                }
+            }
+        } else {
+            const QString number = addVals.value(0);
+            const QString code   = addVals.value(1);
+            const QString name   = addVals.value(2);
+            // PLU: NUMBER=PLU#, CODE=product code, NAME=name. Other
+            // sections have no separate product-code column, so a single
+            // first value is the code — accept it in either position.
+            QString effCode = code, effName = name;
+            if (opTag != QLatin1String("PLU")) {
+                effCode = !number.isEmpty() ? number : code;
+                effName = name;
+            }
+            if (window.addRowForCli(opTag, number, effCode, effName, &err))
+                ++successCount;
+            else {
+                ++failures;
+                QTextStream e(stderr);
+                e << "error: " << err << Qt::endl;
+            }
+        }
+    }
+
+    if (haveDelete) {
+        if (window.removeRowsByCode(opTag, deleteCode, &err)) {
+            ++successCount;
+        } else {
+            ++failures;
+            QTextStream e(stderr);
+            e << "error: " << err << Qt::endl;
+        }
+    }
+
+    if (failures > 0)
+        return 4;
+
+    if (successCount == 0) {
+        QTextStream e(stderr);
+        e << "error: nothing to do\n" << Qt::endl;
+        cliUsage(e);
+        return 2;
+    }
+
+    window.saveFile();
+
+    QTextStream out(stdout);
+    out << opTag << ": " << (haveDelete ? "deleted " : "added ")
+        << successCount << " row(s); saved " << filePath
+        << " (backup: " << filePath << ".BAK)" << Qt::endl;
+    return 0;
 }

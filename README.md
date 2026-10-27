@@ -41,6 +41,34 @@ The app can update itself from the repo's GitHub Releases:
 - `--version` prints the running version (dev builds report `0.0.0`;
   release builds carry their tag). `Help → About` shows it too.
 
+## Command-line editing (headless, script-safe)
+
+The same editor binary can be driven without a window — useful for bulk
+product work and for scripts/AI agents, since every edit goes through the
+very same load/clone/overlay/save machinery the GUI uses and is emitted by
+the device-exact writer (CRLF + trailing tabs, matching what the scale's
+own firmware writes).
+
+```bash
+tms_editor FILE.TMS --list PLU            # dump rows (header + rows, TSV)
+tms_editor FILE.TMS --add PLU 9 4099 "Beef Tendon"
+tms_editor FILE.TMS --add PLU --csv items.csv   # lines: code,name (CSV)
+tms_editor FILE.TMS --add DPT 9 "New Department"  # non-PLU: code + value
+tms_editor FILE.TMS --delete PLU 4099     # matches product code (or PLU #)
+```
+
+- Every mutation **backs up to `FILE.TMS.BAK` first**, then saves in place.
+- `--list` prints the per-section table exactly as the GUI tab shows it.
+- Exit codes: `0` ok · `2` usage error · `3` file/load error · `4` operation
+  error (e.g. no row matched, section unknown).
+- Headless runs never open a window and never perform the start-up update
+  check, so scripting a file edit touches neither the network nor a GUI.
+
+> Keep scale-rendered fields (names, descriptions) to Latin letters and
+> digits — the DL-series label printer only carries a built-in Latin bitmap
+> font; CJK characters render as `?` on the label. Chinese product names
+> belong on the POS/back-office side, which fonts it from the system.
+
 ## Saving (DLX‑50 behaviour)
 
 - **Ctrl+S (Save)** — copies the current file to `<file>.BAK`, then writes

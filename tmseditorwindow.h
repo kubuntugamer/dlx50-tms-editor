@@ -35,6 +35,28 @@ public slots:
     void addRowToSection(const QString& tag);
     void removeSelectedRows(const QString& tag);
 
+    // Headless/CLI operations (issue #6): the same load/clone/overlay/save
+    // machinery the GUI buttons use, so a scripted or AI-driven edit can
+    // never emit a format the GUI itself would write. No dialogs, no
+    // statusBar interplay beyond harmless messages.
+    bool fileLoaded() const { return m_fileLoaded; }
+
+    // Display rows of a section as tab-joined lines, header line first.
+    bool listSection(const QString& tag, QStringList* out) const;
+
+    // Add a row like the "Add row" button (clone the last row, auto-number
+    // the leading identity token), then override values the caller supplied:
+    //   PLU      : number→col 0 (PLU #), productCode→col 1, name→col 2 (name)
+    //   sections : productCode→col 0 (code), name→col 1 (value/description)
+    // Pass empty strings to keep the defaults from the clone step.
+    bool addRowForCli(const QString& tag, const QString& number,
+                      const QString& productCode, const QString& name,
+                      QString* errOut);
+
+    // Delete the row(s) whose product code (PLU) or code column matches.
+    bool removeRowsByCode(const QString& tag, const QString& code,
+                          QString* errOut);
+
 private slots:
     void onCellChanged();
 
@@ -44,6 +66,10 @@ private:
     void startUpdateCheck();
 
     bool loadFile(const QString& path);
+
+    bool m_fileLoaded = false;
+
+    void removeRowsAt(const QString& tag, const QVector<int>& rows);
 
     QString rawSection(const QString& tag);
 

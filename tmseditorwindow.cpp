@@ -220,6 +220,7 @@ bool TmsEditorWindow::loadFile(const QString& path)
     }
 
     statusBar()->showMessage(tr("Loaded: %1").arg(QFileInfo(path).fileName()));
+    m_fileLoaded = true;
     return true;
 }
 
@@ -560,6 +561,15 @@ void TmsEditorWindow::removeSelectedRows(const QString& tag)
         rows.append(idx.row());
     std::sort(rows.begin(), rows.end());
 
+    removeRowsAt(tag, rows);
+}
+
+void TmsEditorWindow::removeRowsAt(const QString& tag, const QVector<int>& rows)
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table)
+        return;
+
     // Remove from the back so the earlier indices stay valid.
     for (int i = rows.size() - 1; i >= 0; --i) {
         const int r = rows.at(i);
@@ -576,6 +586,120 @@ void TmsEditorWindow::removeSelectedRows(const QString& tag)
     statusBar()->showMessage(
         tr("Deleted %1 row(s) from %2 — Save to write the change")
             .arg(rows.size()).arg(tag));
+}
+
+// ----------------------------------------------------------------
+// Headless/CLI operations (issue #6). Every mutation goes through the
+// exact code path the GUI uses — addRowToSection's clone+numbering, the
+// table cells as the single source of truth for Save, the Save overlay
+// that maps cells back onto the stored tokens — so a scripted or
+// AI-driven edit can never emit a format the GUI itself does not write.
+// ----------------------------------------------------------------
+bool TmsEditorWindow::listSection(const QString& tag, QStringList* out) const
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table || !out)
+        return false;
+
+    // Header line: "0" is always the identity/code column; the rest follow.
+    QStringList header;
+    for (int c = 0; c < table->columnCount(); ++c) {
+        QTableWidgetItem* it = table->horizontalHeaderItem(c);
+        header.append(it ? it->text() : QString::number(c + 1));
+    }
+    out->append(header.join(QLatin1Char('\t')));
+
+    for (int r = 0; r < table->rowCount(); ++r) {
+        QStringList cells;
+        for (int c = 0; c < table->columnCount(); ++c) {
+            QTableWidgetItem* it = table->item(r, c);
+            cells.append(it ? it->text() : QString());
+        }
+        out->append(cells.join(QLatin1Char('\t')));
+    }
+    return true;
+}
+
+bool TmsEditorWindow::addRowForCli(const QString& tag, const QString& number,
+                                   const QString& productCode,
+                                   const QString& name, QString* errOut)
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table) {
+        if (errOut)
+            *errOut = tr("no such section: %1").arg(tag);
+        return false;
+    }
+
+    const int rowsBefore = table->rowCount();
+
+    // Exactly the GUI "Add row" path: clone the last row, auto-number it,
+    // clear the PLU product code, preset the PLU name. The empty-section
+    // bootstrap and its PLU exception come along for free.
+    addRowToSection(tag);
+    if (table->rowCount() == rowsBefore) {
+        if (errOut)
+            *errOut = tr("could not add a %1 row").arg(tag);
+        return false;
+    }
+    const int r = table->rowCount() - 1;
+
+    // Overrides, mapped the same way the Save overlay maps display cells
+    // onto stored tokens. Empty string = keep the cloned default.
+    if (tag == "PLU") {
+        if (!number.isEmpty() && table->item(r, 0))
+            table->item(r, 0)->setText(number);
+        if (!productCode.isEmpty() && table->item(r, 1))
+            table->item(r, 1)->setText(productCode);
+        if (!name.isEmpty() && table->item(r, 2))
+            table->item(r, 2)->setText(name);
+    } else {
+        // Sections: the identity/code column is col 0, value col is col 1.
+        if (!productCode.isEmpty() && table->item(r, 0))
+            table->item(r, 0)->setText(productCode);
+        else if (!number.isEmpty() && table->item(r, 0))
+            table->item(r, 0)->setText(number);
+        if (!name.isEmpty() && table->item(r, 1))
+            table->item(r, 1)->setText(name);
+    }
+    return true;
+}
+
+bool TmsEditorWindow::removeRowsByCode(const QString& tag, const QString& code,
+                                       QString* errOut)
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table) {
+        if (errOut)
+            *errOut = tr("no such section: %1").arg(tag);
+        return false;
+    }
+    if (code.isEmpty()) {
+        if (errOut)
+            *errOut = tr("empty code — nothing to match");
+        return false;
+    }
+
+    QVector<int> rows;
+    for (int r = 0; r < table->rowCount(); ++r) {
+        // PLU rows match the product code (col 1) first, else the PLU #;
+        // other sections match the code column (col 0).
+        const int cols = table->columnCount();
+        const int prim = (tag == "PLU" && cols > 1) ? 1 : 0;
+        const int sec  = (prim == 1) ? 0 : 1;
+        QTableWidgetItem* a = (prim < cols) ? table->item(r, prim) : nullptr;
+        QTableWidgetItem* b = (sec  < cols) ? table->item(r, sec)  : nullptr;
+        if ((a && a->text() == code) || (b && b->text() == code))
+            rows.append(r);
+    }
+    if (rows.isEmpty()) {
+        if (errOut)
+            *errOut = tr("no %1 row with code '%2'").arg(tag, code);
+        return false;
+    }
+
+    removeRowsAt(tag, rows);
+    return true;
 }
 
 // ----------------------------------------------------------------
