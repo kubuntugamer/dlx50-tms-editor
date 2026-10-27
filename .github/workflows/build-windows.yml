@@ -60,11 +60,9 @@ jobs:
             # compare it against the latest release (APP_VERSION).
             $ver = $env:GITHUB_REF_NAME.Substring(1)
           }
-          cmake -S . -B build -G Ninja
-            -DCMAKE_BUILD_TYPE=Release
-            -DCMAKE_C_COMPILER=gcc
-            -DCMAKE_CXX_COMPILER=g++
-            -DTMS_APP_VERSION="$ver"
+          # NB: pwsh does NOT accept bash backslash continuation — keep the
+          # whole cmake invocation on one line.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DTMS_APP_VERSION="$ver"
 
       - name: Build
         run: cmake --build build --parallel
