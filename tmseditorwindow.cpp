@@ -20,6 +20,8 @@
 #include <QStringList>
 #include <QVector>
 #include <QRegularExpression>
+#include <QLineEdit>
+#include <QKeyEvent>
 #include <QMenu>
 #include <QMenuBar>
 #include <QStatusBar>
@@ -174,16 +176,99 @@ bool TmsEditorWindow::loadFile(const QString& path)
 // ----------------------------------------------------------------
 // Return the raw block for a given section (including DWL/END markers)
 // ----------------------------------------------------------------
+namespace {
+
+struct SectionRow {
+    QStringList tokens;   // full row token list, section tag kept once
+    int offset = 0;       // 1 when tokens[0] is the section tag
+};
+
+QString sectionStartMarker(const QString& tag) { return QString("DWL\t%1").arg(tag); }
+QString sectionEndMarker(const QString& tag)   { return QString("END\t%1").arg(tag); }
+
+// Locate "DWL<TAB>TAG" / "END<TAB>TAG" without assuming what follows the tag:
+// older output ended the marker with a tab, this one ends it with a newline,
+// and both have to be understood.
+int indexOfSectionMarker(const QString& text, const QString& marker, int from)
+{
+    int pos = from;
+    while ((pos = text.indexOf(marker, pos)) != -1) {
+        const int after = pos + marker.size();
+        if (after >= text.size())
+            return pos;
+        const QChar c = text.at(after);
+        if (c == '\t' || c == '\r' || c == '\n')
+            return pos;
+        pos = after;
+    }
+    return -1;
+}
+
+// Split a "DWL<TAB>TAG ... END<TAB>TAG" block into its data rows.  The markers
+// are removed from the text instead of skipped line by line, because the first
+// data row can share a line with the DWL marker.
+QVector<SectionRow> parseSectionBlock(const QString& block, const QString& tag)
+{
+    const QString startMarker = sectionStartMarker(tag);
+    const QString endMarker   = sectionEndMarker(tag);
+
+    QString body = block;
+    if (body.startsWith(startMarker))
+        body.remove(0, startMarker.size());
+    if (body.startsWith('\t'))          // "DWL\tTAG\t"
+        body.remove(0, 1);
+    if (body.startsWith('\r'))
+        body.remove(0, 1);
+    if (body.startsWith('\n'))
+        body.remove(0, 1);
+
+    if (body.endsWith(endMarker))
+        body.chop(endMarker.size());
+    if (body.endsWith('\t'))            // "END\tTAG\t"
+        body.chop(1);
+    if (body.endsWith('\r'))
+        body.chop(1);
+    if (body.endsWith('\n'))
+        body.chop(1);
+
+    QVector<SectionRow> rows;
+    const QStringList lines = body.split('\n');
+    for (QString line : lines) {
+        if (line.endsWith('\r'))
+            line.chop(1);
+        if (line.isEmpty())
+            continue;
+
+        QStringList tokens = line.split('\t', Qt::KeepEmptyParts);
+        // Older output repeated the section tag at the start of the row.
+        while (tokens.size() > 1 && tokens.at(0) == tag && tokens.at(1) == tag)
+            tokens.removeFirst();
+
+        SectionRow row;
+        row.tokens = tokens;
+        row.offset = (!tokens.isEmpty() && tokens.first() == tag) ? 1 : 0;
+        rows.append(row);
+    }
+    return rows;
+}
+
+} // namespace
+
 QString TmsEditorWindow::rawSection(const QString& tag)
 {
-    QString startMarker = QString("DWL\t%1\t").arg(tag);
-    QString endMarker   = QString("END\t%1\t").arg(tag);
+    const QString startMarker = QString("DWL\t%1").arg(tag);
+    const QString endMarker   = QString("END\t%1").arg(tag);
 
-    int startIdx = m_rawContent.indexOf(startMarker);
-    if (startIdx == -1) return QString();
+    const int startIdx = indexOfSectionMarker(m_rawContent, startMarker, 0);
+    if (startIdx == -1)
+        return QString();
 
-    int endIdx = m_rawContent.indexOf(endMarker, startIdx + startMarker.size());
-    if (endIdx == -1) return QString();    return m_rawContent.mid(startIdx, (endIdx + endMarker.size()) - startIdx);
+    const int endIdx = indexOfSectionMarker(m_rawContent, endMarker,
+                                            startIdx + startMarker.size());
+    if (endIdx == -1)
+        return QString();
+
+    return m_rawContent.mid(startIdx, (endIdx + endMarker.size()) - startIdx);
 }
 
 // ----------------------------------------------------------------
@@ -191,201 +276,6 @@ QString TmsEditorWindow::rawSection(const QString& tag)
 // ----------------------------------------------------------------
 void TmsEditorWindow::populateTab(const QString& tag, QTableWidget* table)
 {
-    const QString block = rawSection(tag);
-    if (block.isEmpty()) {
-        // No section in the file – leave the table empty but set the appropriate headers.
-        QStringList headers;
-        int cols = m_colCount.value(tag, 1);
-
-        if (tag == "PLU")
-            headers << tr("PLU #") << tr("Product code") << tr("Product name") << tr("Rest (weight/price)");
-        else if (tag == "DPT")
-            headers << tr("DPT code") << tr("Value / description");
-        else if (tag == "CLS")
-            headers << tr("CLS code") << tr("Default value");
-        else if (tag == "UNT")
-            headers << tr("Unit code") << tr("Description") << tr("Factor");
-        else if (tag == "BAR")
-            headers << tr("Barcode #") << tr("Barcode data");
-        else if (tag == "TMS")
-            headers << tr("TMS ID") << tr("Value");
-        else if (tag == "TMR") {
-            headers << tr("TMR data");
-            table->setColumnCount(1);
-        }
-        else if (tag == "INF")
-            headers << tr("Field") << tr("Value");
-        else if (tag == "TMT")
-            headers << tr("Code") << tr("Message");
-        else if (tag == "REP")
-            headers << tr("REP code") << tr("Data");
-        else if (tag == "SCP")
-            headers << tr("SCP code") << tr("Subcode") << tr("Value");
-        else
-            headers << tr("Column");
-
-        table->setColumnCount(cols);
-        table->setRowCount(0);
-        table->setHorizontalHeaderLabels(headers);
-        table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-        return;
-    }
-
-    // Split the raw block into individual lines.
-    QStringList lines = block.split('\n', Qt::SkipEmptyParts);
-
-    // Extract only the content lines (skip the DWL/END markers).
-    QStringList contentLines;
-    for (const QString& line : lines) {
-        if (line.startsWith("DWL\t"))
-            continue;
-        if (line.startsWith("END\t"))
-            continue;
-        contentLines.append(line);
-    }
-
-    int cols = m_colCount.value(tag, 1);
-    QVector<QVector<QString>> rowsData;
-
-    if (tag == "PLU") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("PLU\t"))
-                continue;
-
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QString name;
-            int nameIdx = -1;
-            for (int i = 2; i < (int)fields.size(); ++i) {
-                if (fields[i].contains(QRegularExpression("[A-Za-z]"))) {
-                    name = fields[i];
-                    nameIdx = i;
-                    break;
-                }
-            }
-
-            QString rest;
-            if (nameIdx >= 0 && nameIdx + 1 < (int)fields.size()) {
-                rest = fields.mid(nameIdx + 1).join('\t');
-            }
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // PLU #
-            row.append(fields.value(1));   // Product code
-            row.append(name);               // Product name
-            row.append(rest);               // Rest
-            rowsData.append(row);
-        }
-    } else if (tag == "DPT") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("DPT\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // DPT code
-            row.append(fields.mid(1).join('\t'));
-            rowsData.append(row);
-        }
-    } else if (tag == "CLS") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("CLS\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // CLS code
-            row.append(fields.mid(1).join('\t'));
-            rowsData.append(row);
-        }
-    } else if (tag == "UNT") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("UNT\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // Unit code
-            row.append(fields.value(1));   // Description
-            row.append(fields.value(2));   // Factor
-            rowsData.append(row);
-        }
-    } else if (tag == "BAR") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("BAR\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // Barcode number
-            row.append(fields.mid(1).join('\t'));
-            rowsData.append(row);
-        }
-    } else if (tag == "TMS") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("TMS\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // TMS ID
-            row.append(fields.value(1));   // Value
-            rowsData.append(row);
-        }
-    } else if (tag == "TMR") {
-        for (const QString& line : contentLines) {
-            QVector<QString> row;
-            row.append(line);
-            rowsData.append(row);
-        }
-    } else if (tag == "INF") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("INF\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // field name
-            row.append(fields.mid(1).join('\t'));
-            rowsData.append(row);
-        }
-    } else if (tag == "TMT") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("TMT\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // code
-            row.append(fields.mid(1).join('\t'));
-            rowsData.append(row);
-        }
-    } else if (tag == "REP") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("REP\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // REP code
-            row.append(fields.mid(1).join('\t'));
-            rowsData.append(row);
-        }
-    } else if (tag == "SCP") {
-        for (const QString& line : contentLines) {
-            if (!line.startsWith("SCP\t"))
-                continue;
-            QStringList fields = line.split('\t', Qt::SkipEmptyParts);
-
-            QVector<QString> row;
-            row.append(fields.value(0));   // SCP code
-            row.append(fields.value(1));   // Subcode
-            row.append(fields.mid(2).join('\t'));
-            rowsData.append(row);
-        }
-    }
-
-    // Set up the headers for this tab.
     QStringList headers;
     if (tag == "PLU")
         headers << tr("PLU #") << tr("Product code") << tr("Product name") << tr("Rest (weight/price)");
@@ -412,20 +302,77 @@ void TmsEditorWindow::populateTab(const QString& tag, QTableWidget* table)
     else
         headers << tr("Column");
 
-    int finalCols = headers.size();
-    table->setColumnCount(finalCols);
-    table->setHorizontalHeaderLabels(headers);          // <-- was missing
+    const int cols = qMax(1, m_colCount.value(tag, headers.size()));
+
+    table->setColumnCount(cols);
+    table->setRowCount(0);
+    table->setHorizontalHeaderLabels(headers);
     table->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
 
-    int rowCount = rowsData.size();
-    table->setRowCount(rowCount);
+    m_rowTokens.remove(tag);
+    m_rowOffsets.remove(tag);
+    m_rowNameIdx.remove(tag);
 
-    for (int r = 0; r < rowCount; ++r) {
-        for (int c = 0; c < finalCols; ++c) {
-            QString val = (c < (int)rowsData[r].size()) ? rowsData[r][c] : QString();
-            QTableWidgetItem* item = new QTableWidgetItem(val);
-            table->setItem(r, c, item);
+    const QString block = rawSection(tag);
+    if (block.isEmpty())
+        return;
+
+    const QVector<SectionRow> rows = parseSectionBlock(block, tag);
+
+    QVector<QStringList> tokenRows;
+    QVector<int> offsets;
+    QVector<int> nameIndexes;
+    QVector<QVector<QString>> displayRows;
+
+    for (const SectionRow& row : rows) {
+        tokenRows.append(row.tokens);
+        offsets.append(row.offset);
+
+        QVector<QString> display;
+
+        if (tag == "PLU") {
+            // PLU # and product code are the first two tokens after the tag;
+            // the product name is the first token holding letters (everything
+            // before it is numeric codes, prices and weights).
+            const int base = row.offset;
+            int nameIdx = -1;
+            for (int i = base + 1; i < row.tokens.size(); ++i) {
+                if (row.tokens.at(i).contains(QRegularExpression("[A-Za-z]"))) {
+                    nameIdx = i;
+                    break;
+                }
+            }
+            nameIndexes.append(nameIdx);
+
+            const QString number = row.tokens.value(base);
+            const QString code   = (nameIdx == base + 1) ? QString()
+                                                         : row.tokens.value(base + 1);
+            const QString name   = (nameIdx >= 0) ? row.tokens.at(nameIdx)
+                                                  : row.tokens.value(base + 1);
+            QString rest;
+            if (nameIdx >= 0 && nameIdx + 1 < row.tokens.size())
+                rest = row.tokens.mid(nameIdx + 1).join('\t');
+
+            display << number << code << name << rest;
+        } else {
+            nameIndexes.append(-1);
+            for (int c = 0; c < cols; ++c)
+                display << row.tokens.value(row.offset + c);
         }
+
+        displayRows.append(display);
+    }
+
+    // Keep the complete token rows so Save can write back the fields that have
+    // no column of their own.
+    m_rowTokens[tag]  = tokenRows;
+    m_rowOffsets[tag] = offsets;
+    m_rowNameIdx[tag] = nameIndexes;
+
+    table->setRowCount(displayRows.size());
+    for (int r = 0; r < displayRows.size(); ++r) {
+        for (int c = 0; c < cols; ++c)
+            table->setItem(r, c, new QTableWidgetItem(displayRows.at(r).value(c)));
     }
 }
 
@@ -479,6 +426,36 @@ static QString backupToBak(const QString& path)
 }
 
 // ----------------------------------------------------------------
+// A QTableWidget keeps freshly typed text in its cell editor until that
+// editor closes; saving at that moment would write the previous value.  Drop
+// the focus so the delegate commits what the user just typed.
+static void commitOpenCellEditors(const QMap<QString, QTableWidget*>& tables)
+{
+    // Any visible line edit inside a table is an open cell editor.  Sending
+    // Return to it makes the item delegate commit the typed text into the
+    // model, which is what Save needs to see.
+    for (QTableWidget* table : tables) {
+        if (!table)
+            continue;
+        const QList<QLineEdit*> editors = table->findChildren<QLineEdit*>();
+        for (QLineEdit* editor : editors) {
+            if (!editor->isVisible())
+                continue;
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(editor, &commit);
+        }
+    }
+
+    // Editors of other kinds commit when they lose focus.
+    if (QWidget* focus = QApplication::focusWidget()) {
+        if (!qobject_cast<QLineEdit*>(focus) && focus->inherits("QWidget"))
+            focus->clearFocus();
+    }
+
+    QCoreApplication::processEvents();
+}
+
+// ----------------------------------------------------------------
 // Write the given content to the given path.
 // ----------------------------------------------------------------
 static bool writeTextFile(const QString& path, const QString& content,
@@ -509,6 +486,10 @@ void TmsEditorWindow::saveFile()
         return;
     }
 
+    // Commit a cell that is still being edited, otherwise its text is not in
+    // the table yet and would be dropped from the file.
+    commitOpenCellEditors(m_tables);
+
     // Rebuild the raw file content from the current table contents,
     // preserving the original order of sections and all non‑TMS lines
     // that appear outside the DWL…END blocks.
@@ -538,6 +519,8 @@ void TmsEditorWindow::saveFile()
 // ----------------------------------------------------------------
 void TmsEditorWindow::saveFileAs()
 {
+    commitOpenCellEditors(m_tables);
+
     QString path = QFileDialog::getSaveFileName(
         this,
         tr("Save TMS file"),
@@ -578,105 +561,128 @@ void TmsEditorWindow::saveFileAs()
 // ----------------------------------------------------------------
 QString TmsEditorWindow::rebuildFullContentFromTables()
 {
-    // Work on a mutable copy of the current raw file so that every line
-    // that is not part of a recognised DWL…END block survives unchanged.
     QString content = m_rawContent;
 
-    // Ordered list of sections supported by the UI.
-    static const QList<QString> sectionTags = {
-        "PLU", "DPT", "CLS", "UNT", "BAR",
-        "TMS", "TMR", "INF", "TMT", "REP", "SCP"
+    // Every block that exists in the file is re-serialised, including the ones
+    // without a tab of their own, so no section header can stay glued to the
+    // data that used to follow it on the same line.
+    static const QStringList allTags = {
+        "PLU", "DPT", "CLS", "UNT", "BAR", "LAB", "SAL",
+        "REP", "SCF", "SCP", "TMS", "TMT", "TMR", "INF", "TIM", "BMP"
     };
 
-    // For each section, replace the raw DWL…END block with the current
-    // table contents (if a table for that section exists and the file
-    // originally contained that section).
-    for (const QString& tag : sectionTags) {
-        QTableWidget* table = m_tables.value(tag, nullptr);
-        if (!table)
-            continue;
+    for (const QString& tag : allTags) {
+        const QString startMarker = sectionStartMarker(tag);
+        const QString endMarker   = sectionEndMarker(tag);
 
-        QString startMarker = QString("DWL\t%1\t").arg(tag);
-        QString endMarker   = QString("END\t%1\t").arg(tag);
-
-        int startIdx = content.indexOf(startMarker);
+        int startIdx = indexOfSectionMarker(content, startMarker, 0);
         if (startIdx == -1)
             continue;
 
-        int endIdx = content.indexOf(endMarker, startIdx + startMarker.size());
+        const int endIdx = indexOfSectionMarker(content, endMarker,
+                                                startIdx + startMarker.size());
         if (endIdx == -1)
-            continue;        // Reconstruct the block from the table.
-        QString newBlock = startMarker;
-        int rowCount = table->rowCount();
+            continue;
 
-        for (int r = 0; r < rowCount; ++r) {
-            // Emit the section‑specific line prefix.
-            QString linePrefix;
-            if (tag == "PLU")
-                linePrefix = "PLU\t";
-            else if (tag == "DPT")
-                linePrefix = "DPT\t";
-            else if (tag == "CLS")
-                linePrefix = "CLS\t";
-            else if (tag == "UNT")
-                linePrefix = "UNT\t";
-            else if (tag == "BAR")
-                linePrefix = "BAR\t";
-            else if (tag == "TMS")
-                linePrefix = "TMS\t";
-            else if (tag == "TMR")
-                linePrefix = "TMR\t";
-            else if (tag == "INF")
-                linePrefix = "INF\t";
-            else if (tag == "TMT")
-                linePrefix = "TMT\t";
-            else if (tag == "REP")
-                linePrefix = "REP\t";
-            else if (tag == "SCP")
-                linePrefix = "SCP\t";
-            else
-                linePrefix = QString();
+        const int blockEnd = endIdx + endMarker.size();
 
-            QStringList fields;
-            if (tag == "TMS") {
-                // TMS rows are "TMS\t<id>\t<value>" — both columns are real data.
-                // Read them explicitly so the round-trip keeps the value.
-                QTableWidgetItem* idItem  = table->item(r, 0);
-                QTableWidgetItem* valItem = table->item(r, 1);
-                fields << (idItem  ? idItem->text()  : QString());
-                fields << (valItem ? valItem->text() : QString());
-            } else {
-                int colCount = table->columnCount();
-                for (int c = 0; c < colCount; ++c) {
-                    QTableWidgetItem* item = table->item(r, c);
-                    fields << (item ? item->text() : QString());
-                }
+        // Rows come from what was loaded (so the fields without a column are
+        // intact); blocks with no tab are parsed straight from the text.
+        QVector<SectionRow> rows;
+        if (m_rowTokens.contains(tag)) {
+            const QVector<QStringList> stored = m_rowTokens.value(tag);
+            const QVector<int> offsets = m_rowOffsets.value(tag);
+            for (int i = 0; i < stored.size(); ++i) {
+                SectionRow row;
+                row.tokens = stored.at(i);
+                row.offset = (i < offsets.size()) ? offsets.at(i) : 0;
+                rows.append(row);
             }
-
-            QString rowText = linePrefix + fields.join("\t");
-            // The source file ends every TMS data line with a trailing tab
-            // before the line ending, e.g. "TMS\t0\t1\t\r\n". Replicate that
-            // so the round-trip is byte-for-byte identical for the TMS section.
-            // (The DWL/END markers already match exactly via startMarker/endMarker.)
-            if (tag == "TMS")
-                rowText += "\t";
-            newBlock += rowText + "\r\n";
+        } else {
+            rows = parseSectionBlock(content.mid(startIdx, blockEnd - startIdx), tag);
         }
 
-        newBlock += endMarker;
+        // Overlay whatever was edited in the table.
+        QTableWidget* table = m_tables.value(tag, nullptr);
+        if (table) {
+            const QVector<int> nameIndexes = m_rowNameIdx.value(tag);
 
-        // Slice out the old block (DWL line through END line, including
-        // the END line's \r\n) and replace it with newBlock.  newBlock
-        // already ends with \r\n after the END marker, so the replacement
-        // is byte-for-byte identical for unchanged tables.
-        int oldBlockStart = startIdx;
-        int oldBlockEnd   = endIdx + endMarker.size() + 2;  // +2 for \r\n
-        content.replace(oldBlockStart, oldBlockEnd - oldBlockStart, newBlock);
+            for (int r = 0; r < rows.size() && r < table->rowCount(); ++r) {
+                SectionRow& row = rows[r];
+
+                if (tag == "PLU") {
+                    const int nameIdx = (r < nameIndexes.size()) ? nameIndexes.at(r) : -1;
+
+                    if (QTableWidgetItem* item = table->item(r, 0)) {
+                        const int idx = row.offset;              // PLU #
+                        if (idx < row.tokens.size())
+                            row.tokens[idx] = item->text();
+                    }
+                    if (QTableWidgetItem* item = table->item(r, 1)) {
+                        const int idx = row.offset + 1;          // product code
+                        if (nameIdx != idx && idx < row.tokens.size())
+                            row.tokens[idx] = item->text();
+                    }
+                    if (QTableWidgetItem* item = table->item(r, 2)) {
+                        if (nameIdx >= 0 && nameIdx < row.tokens.size())
+                            row.tokens[nameIdx] = item->text();
+                    }
+                    if (QTableWidgetItem* item = table->item(r, 3)) {
+                        if (nameIdx >= 0) {
+                            const QString original = row.tokens.mid(nameIdx + 1).join('\t');
+                            if (item->text() != original) {
+                                row.tokens = row.tokens.mid(0, nameIdx + 1)
+                                           + item->text().split('\t', Qt::KeepEmptyParts);
+                            }
+                        }
+                    }
+                } else {
+                    for (int c = 0; c < table->columnCount(); ++c) {
+                        const int idx = row.offset + c;
+                        if (idx >= row.tokens.size())
+                            break;
+                        if (QTableWidgetItem* item = table->item(r, c))
+                            row.tokens[idx] = item->text();
+                    }
+                }
+            }
+        }
+
+        // Drop stray tabs/spaces an older layout left in front of the header,
+        // and make sure the header actually begins a line.
+        while (startIdx > 0
+               && (content.at(startIdx - 1) == '\t' || content.at(startIdx - 1) == ' ')) {
+            --startIdx;
+        }
+
+        // "DWL<TAB>TAG" alone on its line, one data row per line with single
+        // tabs between fields, then "END<TAB>TAG" alone, then one blank line.
+        QString newBlock;
+        if (startIdx > 0 && content.at(startIdx - 1) != '\n')
+            newBlock += '\n';
+        newBlock += startMarker + "\n";
+        for (const SectionRow& row : rows)
+            newBlock += row.tokens.join('\t') + "\n";
+        newBlock += endMarker + "\n\n";
+
+        int afterIdx = blockEnd;
+        while (afterIdx < content.size()
+               && (content.at(afterIdx) == '\t' || content.at(afterIdx) == ' '
+                   || content.at(afterIdx) == '\r' || content.at(afterIdx) == '\n')) {
+            ++afterIdx;
+        }
+
+        content.replace(startIdx, afterIdx - startIdx, newBlock);
     }
+
+    // Document closer: "END<TAB>ECS" alone on the last line.
+    content.replace(QRegularExpression("END\tECS[ \t]*(?:\r?\n)*\\z"),
+                    QString("END\tECS\n"));
+
+    // Exactly one blank line between blocks, and a terminated last line.
+    content.replace(QRegularExpression("\n{3,}"), "\n\n");
+    if (!content.endsWith('\n'))
+        content += '\n';
 
     return content;
 }
-
-// NOTE: no "#include "tmseditorwindow.moc"" here - the Q_OBJECT class
-// (TmsEditorWindow) is declared in the header, so AUTOMOC generates its
-// moc file from tmseditorwindow.h, not from this .cpp.

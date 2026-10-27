@@ -2,6 +2,9 @@
 
 #include <QMainWindow>
 #include <QString>
+#include <QMap>
+#include <QVector>
+#include <QStringList>
 
 class QTabWidget;
 class QTableWidget;
@@ -41,6 +44,17 @@ private:
     QMap<QString, int> m_colCount;
     QTabWidget* m_tabWidget = nullptr;
     QMap<QString, QTableWidget*> m_tables;
+
+    // Full tab-separated token list of every loaded data row, per section,
+    // with the leading section tag removed. Save writes these back so the
+    // fields that have no column of their own are never lost.
+    QMap<QString, QVector<QStringList>> m_rowTokens;
+
+    // Per row: how many leading tokens are the section tag (0 or 1), and the
+    // index of the product-name token inside m_rowTokens (PLU only, -1 when
+    // the row has no name token).
+    QMap<QString, QVector<int>> m_rowOffsets;
+    QMap<QString, QVector<int>> m_rowNameIdx;
 
     // Rebuild the full file content from the currently displayed tables.
     // Lines that are not part of any DWL…END section are kept verbatim;
