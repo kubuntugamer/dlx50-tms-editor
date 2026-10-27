@@ -519,9 +519,31 @@ void Updater::installLinuxDeb(QWidget* parent, const QString& filePath)
         return;
     }
 
+    // Choose what to relaunch. dpkg replaced the packaged binary in place,
+    // so a .deb-installed copy restarts itself. When we are running a dev
+    // build (e.g. a CMake build tree), relaunching self would come back as
+    // the same un-updated binary — prefer the freshly installed one.
+    QString relaunchPath = QCoreApplication::applicationFilePath();
+    const QString usrBin = QStringLiteral("/usr/bin/dlx50-tms-editor");
+    const QString optBin = QStringLiteral("/opt/dlx50-tms-editor/tms_editor");
+    if (relaunchPath != usrBin && relaunchPath != optBin) {
+        if (QFile::exists(usrBin))
+            relaunchPath = usrBin;
+        else if (QFile::exists(optBin))
+            relaunchPath = optBin;
+        else
+            relaunchPath.clear();
+    }
+
+    if (relaunchPath.isEmpty()) {
+        if (parent)
+            QMessageBox::information(parent, tr("Update installed"),
+                tr("The update is installed. Please restart the editor."));
+        return;
+    }
+
     const bool restarted = QProcess::startDetached(
-        QCoreApplication::applicationFilePath(),
-        QCoreApplication::arguments().mid(1));
+        relaunchPath, QCoreApplication::arguments().mid(1));
     if (parent) {
         QMessageBox::information(parent, tr("Update installed"),
             restarted
@@ -550,6 +572,20 @@ void Updater::installWindowsZip(QWidget* parent, const QString& filePath)
     QDir().mkpath(updateDir);
     const QString unzipDir = updateDir + QStringLiteral("/new");
 
+    // The staged zip lives in a QTemporaryDir that is removed when this
+    // process exits — and the helper only starts unpacking AFTER we exit,
+    // so the archive must be copied somewhere persistent first.
+    const QString persistedZip = updateDir
+        + QStringLiteral("/") + QFileInfo(filePath).fileName();
+    if (QFile::exists(persistedZip))
+        QFile::remove(persistedZip);
+    if (!QFile::copy(filePath, persistedZip)) {
+        if (parent)
+            QMessageBox::warning(parent, tr("Update failed"),
+                tr("Could not stage the update next to the editor."));
+        return;
+    }
+
     // Paths are inlined in plain text instead of using cmd %VARS%, and any
     // quoting stays inside Explore-Archive's single quotes.
     QString bat;
@@ -559,7 +595,7 @@ void Updater::installWindowsZip(QWidget* parent, const QString& filePath)
     bat += QStringLiteral("if exist \"%1\" rmdir /s /q \"%1\"\r\n").arg(unzipDir);
     bat += QStringLiteral("powershell -NoProfile -ExecutionPolicy Bypass "
                           "-Command \"Expand-Archive -Force -LiteralPath '%1' "
-                          "-DestinationPath '%2'\"\r\n").arg(filePath, unzipDir);
+                          "-DestinationPath '%2'\"\r\n").arg(persistedZip, unzipDir);
     // The release zip's top-level folder is tms_editor/: copy every file and
     // subfolder (DLLs, plugins/…) over the running folder.
     bat += QStringLiteral("xcopy \"%1\\*\" \"%2\\\" /E /Y /I /Q /R /H\r\n")

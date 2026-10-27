@@ -27,6 +27,9 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QStatusBar>
+#include <QVBoxLayout>
+#include <QPushButton>
+#include <QHBoxLayout>
 #include <QTimer>
 #include <algorithm>
 
@@ -112,14 +115,13 @@ void TmsEditorWindow::buildUI()
         if (!m_updater)
             m_updater = new Updater(this);
         m_updater->checkForUpdates(this, true);
-    });
-
-    QAction* aboutAction = helpMenu->addAction(tr("About"));
+    });    QAction* aboutAction = helpMenu->addAction(tr("About"));
     connect(aboutAction, &QAction::triggered, [this]() {
         QMessageBox::about(this, tr("About"),
-            tr("TMS / DLX‑50‑style Editor\n"
+            tr("TMS / DLX‑50‑style Editor v%1\n"
                "Reads / writes DETECTO .TMS scale files.\n"
-               "Qt C++ (Qt Creator 6) build."));
+               "Qt C++ (Qt Creator 6) build.")
+               .arg(Updater::currentVersion()));
     });
 }
 
@@ -182,6 +184,22 @@ bool TmsEditorWindow::loadFile(const QString& path)
         connect(table, &QTableWidget::cellChanged,
                 this, [this, table]() { onCellChanged(); });
 
+        // ---------- Add / delete rows (issue #4) ----------
+        QHBoxLayout* rowButtons = new QHBoxLayout();
+        rowButtons->setContentsMargins(4, 4, 4, 0);
+        QPushButton* addBtn = new QPushButton(tr("Add row"), page);
+        QPushButton* delBtn = new QPushButton(tr("Delete selected"), page);
+        addBtn->setToolTip(tr("Adds a new row cloned from the last one (PLU: next free number, name = NEW PRODUCT). Remember to Save."));
+        delBtn->setToolTip(tr("Removes every selected row from the section."));
+        rowButtons->addWidget(addBtn);
+        rowButtons->addWidget(delBtn);
+        rowButtons->addStretch(1);
+        connect(addBtn, &QPushButton::clicked,
+                this, [this, tag]() { addRowToSection(tag); });
+        connect(delBtn, &QPushButton::clicked,
+                this, [this, tag]() { removeSelectedRows(tag); });
+
+        layout->addLayout(rowButtons);
         layout->addWidget(table);
         page->setLayout(layout);
 
@@ -281,6 +299,45 @@ QVector<SectionRow> parseSectionBlock(const QString& block, const QString& tag)
     return rows;
 }
 
+// Index of the PLU name token inside a row's tokens: the first token after
+// the number/code prefix that contains letters (everything before it is
+// numeric codes, prices and weights).
+int findPluNameIdx(const QStringList& tokens, int base)
+{
+    for (int i = base + 1; i < tokens.size(); ++i) {
+        if (tokens.at(i).contains(QRegularExpression("[A-Za-z]")))
+            return i;
+    }
+    return -1;
+}
+
+// The table-cell texts for a stored token row — the single source of truth
+// shared by populateTab (loading), addRowToSection (new row drafts) and the
+// Save overlay, so the three can never drift apart.
+QVector<QString> buildDisplayRow(const QString& tag, const QStringList& tokens,
+                                 int offset, int cols, int nameIdx)
+{
+    QVector<QString> display;
+
+    if (tag == "PLU") {
+        const int base = offset;
+        const QString number = tokens.value(base);
+        const QString code   = (nameIdx == base + 1) ? QString()
+                                                     : tokens.value(base + 1);
+        const QString name   = (nameIdx >= 0) ? tokens.at(nameIdx)
+                                              : tokens.value(base + 1);
+        QString rest;
+        if (nameIdx >= 0 && nameIdx + 1 < tokens.size())
+            rest = tokens.mid(nameIdx + 1).join('\t');
+
+        display << number << code << name << rest;
+    } else {
+        for (int c = 0; c < cols; ++c)
+            display << tokens.value(offset + c);
+    }
+    return display;
+}
+
 } // namespace
 
 QString TmsEditorWindow::rawSection(const QString& tag)
@@ -357,39 +414,13 @@ void TmsEditorWindow::populateTab(const QString& tag, QTableWidget* table)
         tokenRows.append(row.tokens);
         offsets.append(row.offset);
 
-        QVector<QString> display;
-
-        if (tag == "PLU") {
-            // PLU # and product code are the first two tokens after the tag;
-            // the product name is the first token holding letters (everything
-            // before it is numeric codes, prices and weights).
-            const int base = row.offset;
-            int nameIdx = -1;
-            for (int i = base + 1; i < row.tokens.size(); ++i) {
-                if (row.tokens.at(i).contains(QRegularExpression("[A-Za-z]"))) {
-                    nameIdx = i;
-                    break;
-                }
-            }
-            nameIndexes.append(nameIdx);
-
-            const QString number = row.tokens.value(base);
-            const QString code   = (nameIdx == base + 1) ? QString()
-                                                         : row.tokens.value(base + 1);
-            const QString name   = (nameIdx >= 0) ? row.tokens.at(nameIdx)
-                                                  : row.tokens.value(base + 1);
-            QString rest;
-            if (nameIdx >= 0 && nameIdx + 1 < row.tokens.size())
-                rest = row.tokens.mid(nameIdx + 1).join('\t');
-
-            display << number << code << name << rest;
-        } else {
+        if (tag == "PLU")
+            nameIndexes.append(findPluNameIdx(row.tokens, row.offset));
+        else
             nameIndexes.append(-1);
-            for (int c = 0; c < cols; ++c)
-                display << row.tokens.value(row.offset + c);
-        }
 
-        displayRows.append(display);
+        displayRows.append(buildDisplayRow(tag, row.tokens, row.offset, cols,
+                                           nameIndexes.constLast()));
     }
 
     // Keep the complete token rows so Save can write back the fields that have
@@ -403,6 +434,126 @@ void TmsEditorWindow::populateTab(const QString& tag, QTableWidget* table)
         for (int c = 0; c < cols; ++c)
             table->setItem(r, c, new QTableWidgetItem(displayRows.at(r).value(c)));
     }
+}
+
+// ----------------------------------------------------------------
+// Issue #4: add a new product/row by cloning the last row of the section
+// as an editable draft. Cloning keeps the scale's expected field count for
+// the row (PLU rows carry ~60 numeric fields); the identity fields are set
+// so the row is safe to save and easy to spot: PLU gets the next free
+// number and a NEW PRODUCT name, other sections get the next free index.
+// ----------------------------------------------------------------
+void TmsEditorWindow::addRowToSection(const QString& tag)
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table)
+        return;
+
+    QVector<QStringList>& tokenRows = m_rowTokens[tag];
+    if (tokenRows.isEmpty()) {
+        statusBar()->showMessage(
+            tr("%1 has no rows yet — add-row needs an existing row to clone")
+                .arg(tag));
+        return;
+    }
+
+    const int srcIdx = tokenRows.size() - 1;
+    const int srcOffset = m_rowOffsets.value(tag).value(srcIdx, 0);
+
+    QStringList cloned = tokenRows.at(srcIdx);
+
+    // Bump the leading numeric identity token (PLU #, DPT code, …) to the
+    // next free value.
+    const int numIdx = (srcOffset == 1) ? 1 : 0;
+    if (numIdx < cloned.size()) {
+        bool ok = false;
+        const int cur = cloned.at(numIdx).toInt(&ok);
+        if (ok) {
+            int maxVal = cur;
+            for (const QStringList& tw : tokenRows) {
+                const int v = tw.value(numIdx).toInt(&ok);
+                if (ok && v > maxVal)
+                    maxVal = v;
+            }
+            cloned[numIdx] = QString::number(maxVal + 1);
+        }
+    }
+
+    // PLU: the name token must contain letters, or the popup/save logic
+    // mis-detects the column (name would silently fall back to the code
+    // token and typed names would never reach the file).
+    int nameIdx = -1;
+    if (tag == "PLU") {
+        nameIdx = findPluNameIdx(cloned, srcOffset);
+        if (nameIdx == -1) {
+            const int insertAt = srcOffset + 1;
+            cloned.insert(insertAt, tr("NEW PRODUCT"));
+            nameIdx = insertAt;
+        } else {
+            cloned[nameIdx] = tr("NEW PRODUCT");
+        }
+        // Also clear the cloned product/barcode code when the row has one —
+        // leaving it would give the new product the template row's code.
+        if (nameIdx > srcOffset + 1)
+            cloned[srcOffset + 1] = QString();
+    }
+
+    tokenRows.append(cloned);
+    m_rowOffsets[tag].append(srcOffset);
+    m_rowNameIdx[tag].append(nameIdx);
+
+    const int cols = table->columnCount();
+    const QVector<QString> display = buildDisplayRow(tag, cloned, srcOffset,
+                                                     cols, nameIdx);
+    const int r = table->rowCount();
+    table->setRowCount(r + 1);
+    for (int c = 0; c < cols; ++c)
+        table->setItem(r, c, new QTableWidgetItem(display.value(c)));
+
+    table->scrollToBottom();
+    statusBar()->showMessage(
+        tr("Added %1 row %2 (created from row %3) — edit it, then Save")
+            .arg(tag).arg(r + 1).arg(srcIdx + 1));
+}
+
+// ----------------------------------------------------------------
+// Issue #4: delete every selected row from the shown table AND from the
+// stored token rows, so Save stops writing them (the Save overlay is
+// capped at the table's row count, but the block writer emits exactly the
+// stored list — the stored list is the one that had to be trimmed).
+// ----------------------------------------------------------------
+void TmsEditorWindow::removeSelectedRows(const QString& tag)
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table || !table->selectionModel())
+        return;
+
+    const QList<QModelIndex> selected = table->selectionModel()->selectedRows();
+    if (selected.isEmpty()) {
+        statusBar()->showMessage(tr("Select whole rows to delete (click the row number)"));
+        return;
+    }
+    QVector<int> rows;
+    for (const QModelIndex& idx : selected)
+        rows.append(idx.row());
+    std::sort(rows.begin(), rows.end());
+
+    // Remove from the back so the earlier indices stay valid.
+    for (int i = rows.size() - 1; i >= 0; --i) {
+        const int r = rows.at(i);
+        table->removeRow(r);
+        if (r >= 0 && r < m_rowTokens[tag].size()) {
+            m_rowTokens[tag].remove(r);
+            if (r < m_rowOffsets.value(tag).size())
+                m_rowOffsets[tag].remove(r);
+            if (r < m_rowNameIdx.value(tag).size())
+                m_rowNameIdx[tag].remove(r);
+        }
+    }
+
+    statusBar()->showMessage(
+        tr("Deleted %1 row(s) from %2 — Save to write the change")
+            .arg(rows.size()).arg(tag));
 }
 
 // ----------------------------------------------------------------

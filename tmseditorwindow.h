@@ -27,6 +27,14 @@ public slots:
     void saveFile();     // DLX‑50 style: back up to <file>.BAK, overwrite in place
     void saveFileAs();   // Save to a path chosen by the user
 
+    // Add/remove products and rows (issue #4): “Add row” clones the last
+    // row of the section as a numbered draft (PLU: next free number, name
+    // replaced with “NEW PRODUCT”); “Delete selected” removes every
+    // selected row from both the table and the stored token rows so Save
+    // stops writing them. Public slots so test harnesses can drive them.
+    void addRowToSection(const QString& tag);
+    void removeSelectedRows(const QString& tag);
+
 private slots:
     void onCellChanged();
 

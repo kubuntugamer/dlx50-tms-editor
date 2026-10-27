@@ -1,5 +1,7 @@
 #include <QApplication>
+#include <QTextStream>
 #include "tmseditorwindow.h"
+#include "updater.h"
 
 int main(int argc, char *argv[])
 {
@@ -20,10 +22,20 @@ int main(int argc, char *argv[])
 
     QApplication app(argc, argv);
 
-    // QSettings identity — the updater uses this for the "skip update checks"
-    // preference (updater.cpp).
     app.setOrganizationName(QStringLiteral("kubuntugamer"));
     app.setApplicationName(QStringLiteral("dlx50-tms-editor"));
+
+    // --version: print and exit (useful to tell a dev build 0.0.0 apart
+    // from an installed updater target).
+    for (int i = 1; i < argc; ++i) {
+        if (QString(argv[i]).compare(QStringLiteral("--version"),
+                                     Qt::CaseInsensitive) == 0) {
+            QTextStream out(stdout);
+            out << "dlx50-tms-editor " << Updater::currentVersion()
+                << Qt::endl;
+            return 0;
+        }
+    }
 
     // Parse arguments: a .TMS file to open, and the --no-update-check flag
     // (which the updater also honours via QApplication::arguments()).
