@@ -128,16 +128,19 @@ void TmsEditorWindow::buildUI()
 // ----------------------------------------------------------------
 bool TmsEditorWindow::loadFile(const QString& path)
 {
+    // Read RAW bytes — no QIODevice::Text, which would silently convert the
+    // device's CRLF line endings to bare LF. The byte-exact form (CRLF + a
+    // trailing tab on every line) is what the DLX-50 hardware accepts, so
+    // every untouched byte outside the edited blocks must survive a
+    // load→save round trip unchanged.
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    if (!file.open(QIODevice::ReadOnly)) {
         QMessageBox::warning(this, tr("Error"),
             tr("Cannot open file %1:\n%2").arg(path).arg(file.errorString()));
         return false;
     }
 
-    QTextStream in(&file);
-    in.setEncoding(QStringConverter::Utf8);
-    m_rawContent = in.readAll();
+    m_rawContent = QString::fromUtf8(file.readAll());
     file.close();
 
     m_currentFilePath = path;
@@ -660,16 +663,22 @@ static void commitOpenCellEditors(const QMap<QString, QTableWidget*>& tables)
 static bool writeTextFile(const QString& path, const QString& content,
                           QString* errorOut)
 {
+    // Write the exact bytes (UTF-8) with NO QIODevice::Text flag — in text
+    // mode Windows would translate our already-CRLF terminators to CR CRLF
+    // ("\r\r\n"), corrupting the device format.
     QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         if (errorOut)
             *errorOut = file.errorString();
         return false;
     }
 
-    QTextStream out(&file);
-    out.setEncoding(QStringConverter::Utf8);
-    out << content;
+    const QByteArray bytes = content.toUtf8();
+    if (file.write(bytes) != bytes.size()) {
+        if (errorOut)
+            *errorOut = file.errorString();
+        return false;
+    }
     file.close();
     return true;
 }
@@ -867,15 +876,28 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
             --startIdx;
         }
 
-        // "DWL<TAB>TAG" alone on its line, one data row per line with single
-        // tabs between fields, then "END<TAB>TAG" alone, then one blank line.
+        // Device-exact block emission (matches what the DLX-50 itself
+        // writes, byte for byte):
+        //   "DWL<TAB>TAG<TAB>" + CRLF on its own line,
+        //   one data row per line: fields single-tab joined + trailing
+        //   tab + CRLF,
+        //   "END<TAB>TAG<TAB>" + CRLF, then one blank line.
+        // The trailing tab is what the device leaves on every line,
+        // including tabs after an empty last field.
+        auto deviceLine = [](const QString& text) {
+            QString line = text;
+            if (line.isEmpty() || !line.endsWith('\t'))
+                line += '\t';
+            return line + QStringLiteral("\r\n");
+        };
+
         QString newBlock;
         if (startIdx > 0 && content.at(startIdx - 1) != '\n')
-            newBlock += '\n';
-        newBlock += startMarker + "\n";
+            newBlock += "\r\n";
+        newBlock += deviceLine(startMarker);
         for (const SectionRow& row : rows)
-            newBlock += row.tokens.join('\t') + "\n";
-        newBlock += endMarker + "\n\n";
+            newBlock += deviceLine(row.tokens.join('\t'));
+        newBlock += deviceLine(endMarker) + QStringLiteral("\r\n");
 
         int afterIdx = blockEnd;
         while (afterIdx < content.size()
@@ -889,7 +911,7 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
 
     // Document closer: "END<TAB>ECS" alone on the last line.
     content.replace(QRegularExpression("END\tECS[ \t]*(?:\r?\n)*\\z"),
-                    QString("END\tECS\n"));
+                    QString("END\tECS\t\r\n"));
 
     // Exactly one blank line between blocks, and a terminated last line.
     content.replace(QRegularExpression("\n{3,}"), "\n\n");
