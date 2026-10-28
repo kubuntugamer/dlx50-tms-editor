@@ -40,4 +40,34 @@ cp "$WORK/ref.TMS" "$WORK/read.TMS"
 for s in PLU DPT CLS UNT BAR TMS TMT INF; do "$E" "$WORK/read.TMS" --list "$s" $N >/dev/null || bad "list $s exit"; done
 cmp -s "$WORK/ref.TMS" "$WORK/read.TMS" && ok "--list leaves the file unchanged" || bad "--list modified the file"
 
+# 5) --set edits one cell; --list shows the new value.
+cp "$WORK/ref.TMS" "$WORK/set.TMS"
+"$E" "$WORK/set.TMS" --set PLU 0 2 "Edited Name" $N >/dev/null || bad "--set exit"
+"$E" "$WORK/set.TMS" --list PLU $N | sed -n 2p | cut -f3 | grep -q '^Edited Name$' \
+  && ok "--set: cell edited and shown in --list" || bad "--set did not change the cell"
+
+# 6) --set with a bad row is refused and does not change the file.
+cp "$WORK/ref.TMS" "$WORK/badset.TMS"
+"$E" "$WORK/badset.TMS" --set PLU 999 2 "x" $N >/dev/null 2>&1 && bad "--set bad row should fail" || ok "--set bad row refused"
+cmp -s "$WORK/ref.TMS" "$WORK/badset.TMS" && ok "--set bad row left file unchanged" || bad "--set bad row changed the file"
+
+# 7) --delete-row removes one row by index.
+cp "$WORK/ref.TMS" "$WORK/delrow.TMS"
+"$E" "$WORK/delrow.TMS" --delete-row PLU 0 $N >/dev/null || bad "--delete-row exit"
+[ "$("$E" "$WORK/delrow.TMS" --list PLU $N | wc -l)" -eq "$("$E" "$WORK/ref.TMS" --list PLU $N | wc -l)" ] \
+  && bad "--delete-row did not remove a row" || ok "--delete-row removed one row"
+
+# 8) --save-as writes elsewhere and leaves the source unchanged.
+cp "$WORK/ref.TMS" "$WORK/src.TMS"
+"$E" "$WORK/src.TMS" --set PLU 0 2 "Saved As" --save-as "$WORK/out.TMS" $N >/dev/null || bad "--save-as exit"
+cmp -s "$WORK/ref.TMS" "$WORK/src.TMS" && ok "--save-as left the source unchanged" || bad "--save-as changed the source"
+"$E" "$WORK/out.TMS" --list PLU $N | sed -n 2p | cut -f3 | grep -q '^Saved As$' \
+  && ok "--save-as wrote the edit to the new file" || bad "--save-as output missing edit"
+
+# 9) --add PLU with --price stores the price in the price column.
+cp "$WORK/ref.TMS" "$WORK/price.TMS"
+"$E" "$WORK/price.TMS" --add PLU 9 4099 "Priced Item" --price 123,4 $N >/dev/null || bad "--add --price exit"
+"$E" "$WORK/price.TMS" --list PLU $N | tail -1 | cut -f4 | grep -q '^123,4$' \
+  && ok "--add --price: price stored" || bad "--add --price not stored"
+
 exit $fail

@@ -24,9 +24,15 @@ static void cliUsage(QTextStream& out)
            "  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n"
            "      add one row (clone of the last, auto-numbered). PLU: NUMBER\n"
            "      = PLU #, CODE = product code, NAME = product name.\n"
+           "      PLU may also take --price VALUE (stored price, e.g. 799,2)\n"
            "  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n"
            "      bulk add: each line 'CODE,NAME' (header line skipped)\n"
            "  dlx50-tms-editor FILE.TMS --delete TAG CODE   delete matching rows\n"
+           "  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n"
+           "      edit one cell (0-based ROW and COL, as shown by --list)\n"
+           "  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n"
+           "      delete one row by 0-based index\n"
+           "  add --save-as PATH to write the result to PATH instead of FILE\n"
            "  --version | --no-update-check | --help\n"
         << Qt::endl;
 }
@@ -74,7 +80,10 @@ int main(int argc, char* argv[])
     // ---------- CLI manipulation mode detection + parsing ------------- //
     // Values are consumed positionally after each operation flag, stopping
     // at another flag; the leftover leading non-flag token is the file.
-    QString opTag, opListFlag, csvPath, deleteCode;
+    QString opTag, opListFlag, csvPath, deleteCode, addPrice;
+    QString setValue, saveAsPath;
+    int setRow = -1, setCol = -1, deleteRow = -1;
+    bool haveSet = false, haveDeleteRow = false;
     QVector<QString> addVals;           // NUMBER, CODE, NAME
     bool haveList = false, haveAdd = false, haveDelete = false;
 
@@ -104,6 +113,13 @@ int main(int argc, char* argv[])
                     i += 2;
                     continue;
                 }
+                if (v.compare(QLatin1String("--price"),
+                              Qt::CaseInsensitive) == 0) {
+                    if (i + 2 < argc)
+                        addPrice = argv[i + 2];
+                    i += 2;
+                    continue;
+                }
                 if (v.startsWith('-') || addVals.size() >= 3)
                     break;
                 addVals.append(v);
@@ -119,9 +135,37 @@ int main(int argc, char* argv[])
                 deleteCode = argv[++i];
             continue;
         }
+        // --set TAG ROW COL VALUE: edit one cell (0-based row/col).
+        if (a.compare(QLatin1String("--set"), Qt::CaseInsensitive) == 0) {
+            haveSet = true;
+            if (i + 4 < argc) {
+                opTag = argv[i + 1];
+                setRow = QString(argv[i + 2]).toInt();
+                setCol = QString(argv[i + 3]).toInt();
+                setValue = argv[i + 4];
+            }
+            i += 4;
+            continue;
+        }
+        // --delete-row TAG ROW: delete one row by 0-based index.
+        if (a.compare(QLatin1String("--delete-row"), Qt::CaseInsensitive) == 0) {
+            haveDeleteRow = true;
+            if (i + 2 < argc) {
+                opTag = argv[i + 1];
+                deleteRow = QString(argv[i + 2]).toInt();
+            }
+            i += 2;
+            continue;
+        }
+        // --save-as PATH: write the result to PATH instead of the input file.
+        if (a.compare(QLatin1String("--save-as"), Qt::CaseInsensitive) == 0) {
+            if (i + 1 < argc)
+                saveAsPath = argv[++i];
+            continue;
+        }
     }
 
-    const bool cliMode = haveList || haveAdd || haveDelete;
+    const bool cliMode = haveList || haveAdd || haveDelete || haveSet || haveDeleteRow;
     if (!cliMode) {
         // GUI mode: first non-flag argument is the file to open.
         QString filePath;
@@ -255,7 +299,7 @@ int main(int argc, char* argv[])
                 effCode = !number.isEmpty() ? number : code;
                 effName = name;
             }
-            if (window.addRowForCli(opTag, number, effCode, effName, &err))
+            if (window.addRowForCli(opTag, number, effCode, effName, &err, addPrice))
                 ++successCount;
             else {
                 ++failures;
@@ -275,6 +319,26 @@ int main(int argc, char* argv[])
         }
     }
 
+    if (haveSet) {
+        if (window.setCellForCli(opTag, setRow, setCol, setValue, &err)) {
+            ++successCount;
+        } else {
+            ++failures;
+            QTextStream e(stderr);
+            e << "error: " << err << Qt::endl;
+        }
+    }
+
+    if (haveDeleteRow) {
+        if (window.removeRowForCli(opTag, deleteRow, &err)) {
+            ++successCount;
+        } else {
+            ++failures;
+            QTextStream e(stderr);
+            e << "error: " << err << Qt::endl;
+        }
+    }
+
     if (failures > 0)
         return 4;
 
@@ -285,10 +349,21 @@ int main(int argc, char* argv[])
         return 2;
     }
 
+    if (!saveAsPath.isEmpty()) {
+        if (!window.saveToPathForCli(saveAsPath, &err)) {
+            QTextStream e(stderr);
+            e << "error: " << err << Qt::endl;
+            return 3;
+        }
+        QTextStream out(stdout);
+        out << opTag << ": " << successCount << " change(s); saved " << saveAsPath << Qt::endl;
+        return 0;
+    }
+
     window.saveFile();
 
     QTextStream out(stdout);
-    out << opTag << ": " << (haveDelete ? "deleted " : "added ")
+    out << opTag << ": " << (haveDelete || haveDeleteRow ? "deleted " : haveSet ? "edited " : "added ")
         << successCount << " row(s); saved " << filePath
         << " (backup: " << filePath << ".BAK)" << Qt::endl;
     return 0;

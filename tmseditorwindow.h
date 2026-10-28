@@ -51,11 +51,21 @@ public slots:
     // Pass empty strings to keep the defaults from the clone step.
     bool addRowForCli(const QString& tag, const QString& number,
                       const QString& productCode, const QString& name,
-                      QString* errOut);
+                      QString* errOut, const QString& price = QString());
 
     // Delete the row(s) whose product code (PLU) or code column matches.
     bool removeRowsByCode(const QString& tag, const QString& code,
                           QString* errOut);
+
+    // Edit one cell (0-based row/col), as typing into the table does.
+    bool setCellForCli(const QString& tag, int row, int col,
+                       const QString& value, QString* errOut);
+
+    // Delete one row by 0-based index, as selecting it and pressing Delete does.
+    bool removeRowForCli(const QString& tag, int row, QString* errOut);
+
+    // Save to a path without a dialog, with the same backup rules as Save As.
+    bool saveToPathForCli(const QString& path, QString* errOut);
 
 private slots:
     void onCellChanged();

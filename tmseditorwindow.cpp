@@ -647,7 +647,8 @@ bool TmsEditorWindow::listSection(const QString& tag, QStringList* out) const
 
 bool TmsEditorWindow::addRowForCli(const QString& tag, const QString& number,
                                    const QString& productCode,
-                                   const QString& name, QString* errOut)
+                                   const QString& name, QString* errOut,
+                                   const QString& price)
 {
     QTableWidget* table = m_tables.value(tag, nullptr);
     if (!table) {
@@ -678,6 +679,8 @@ bool TmsEditorWindow::addRowForCli(const QString& tag, const QString& number,
             table->item(r, 1)->setText(productCode);
         if (!name.isEmpty() && table->item(r, 2))
             table->item(r, 2)->setText(name);
+        if (!price.isEmpty() && table->item(r, 3))
+            table->item(r, 3)->setText(price);
     } else if (tag == "BAR") {
         // BAR rows display the row index as "Barcode #" (col 0) and the
         // barcode string as "Barcode data" (col 1).  For a new BAR row the
@@ -735,6 +738,47 @@ bool TmsEditorWindow::removeRowsByCode(const QString& tag, const QString& code,
     }
 
     removeRowsAt(tag, rows);
+    return true;
+}
+
+bool TmsEditorWindow::setCellForCli(const QString& tag, int row, int col,
+                                    const QString& value, QString* errOut)
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table) {
+        if (errOut)
+            *errOut = tr("no such section: %1").arg(tag);
+        return false;
+    }
+    if (row < 0 || row >= table->rowCount() || col < 0 || col >= table->columnCount()) {
+        if (errOut)
+            *errOut = tr("cell %1,%2 is outside the %3 table (%4 rows, %5 columns)")
+                          .arg(row).arg(col).arg(tag)
+                          .arg(table->rowCount()).arg(table->columnCount());
+        return false;
+    }
+    if (QTableWidgetItem* it = table->item(row, col))
+        it->setText(value);
+    else
+        table->setItem(row, col, new QTableWidgetItem(value));
+    return true;
+}
+
+bool TmsEditorWindow::removeRowForCli(const QString& tag, int row, QString* errOut)
+{
+    QTableWidget* table = m_tables.value(tag, nullptr);
+    if (!table) {
+        if (errOut)
+            *errOut = tr("no such section: %1").arg(tag);
+        return false;
+    }
+    if (row < 0 || row >= table->rowCount()) {
+        if (errOut)
+            *errOut = tr("row %1 is outside the %2 table (%3 rows)")
+                          .arg(row).arg(tag).arg(table->rowCount());
+        return false;
+    }
+    removeRowsAt(tag, QVector<int>{ row });
     return true;
 }
 
@@ -840,6 +884,26 @@ static bool writeTextFile(const QString& path, const QString& content,
         return false;
     }
     file.close();
+    return true;
+}
+
+bool TmsEditorWindow::saveToPathForCli(const QString& path, QString* errOut)
+{
+    commitOpenCellEditors(m_tables);
+    const QString updatedContent = rebuildFullContentFromTables();
+
+    if (QFile::exists(path))
+        backupToBak(path);
+
+    QString err;
+    if (!writeTextFile(path, updatedContent, &err)) {
+        if (errOut)
+            *errOut = tr("Cannot write to file %1: %2").arg(path, err);
+        return false;
+    }
+
+    m_rawContent = updatedContent;
+    m_currentFilePath = path;
     return true;
 }
 
