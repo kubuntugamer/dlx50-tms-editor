@@ -335,6 +335,25 @@ QVector<QString> buildDisplayRow(const QString& tag, const QStringList& tokens,
             rest = tokens.mid(nameIdx + 1).join('\t');
 
         display << number << code << name << rest;
+    } else if (tag == "BAR") {
+        // Real DLX-50 BAR rows carry the barcode string in a later field
+        // (index 6 in the file we inspected: BAR\tidx\t0\t0\t0\t0\tBARCODE\r),
+        // with fields 2-5 as hidden numeric placeholders. Show the row index
+        // as "Barcode #" and the barcode string as "Barcode data" so the user
+        // can actually see and edit the barcode — the hidden fields are
+        // preserved untouched through load/save (like PLU's weight/price
+        // fields) and survive a round-trip because the save overlay only
+        // touches the two displayed columns.
+        // The file we inspected stores BAR rows as
+        //   BAR\t<idx>\t0\t0\t0\t0\t<barcode>\r
+        // and parseSectionBlock strips the leading "BAR" tag, so the stored
+        // tokens are [<idx>, 0, 0, 0, 0, <barcode>].  Show token[0] (the row
+        // index) as "Barcode #" and token[5] (the barcode string) as
+        // "Barcode data".  Fields 1-4 are hidden numeric placeholders that
+        // survive a round-trip because the save overlay below only touches
+        // tokens 0 and 5.
+        display << tokens.value(offset);                           // Barcode # (row index)
+        display << (tokens.size() > offset + 5 ? tokens.value(offset + 5) : QString());  // Barcode data
     } else {
         for (int c = 0; c < cols; ++c)
             display << tokens.value(offset + c);
@@ -519,6 +538,14 @@ void TmsEditorWindow::addRowToSection(const QString& tag)
         // leaving it would give the new product the template row's code.
         if (nameIdx > srcOffset + 1)
             cloned[srcOffset + 1] = QString();
+    } else if (tag == "BAR") {
+        // The barcode data lives in a fixed later field (token[offset+5] in
+        // the files we have seen).  Clear it on clone so a newly added BAR
+        // row starts blank and the CLI addRowForCli path (or a manual edit)
+        // can populate it without the template row's barcode sticking.
+        const int barcodeIdx = srcOffset + 5;
+        if (barcodeIdx < cloned.size())
+            cloned[barcodeIdx] = QString();
     }
 
     tokenRows.append(cloned);
@@ -653,6 +680,17 @@ bool TmsEditorWindow::addRowForCli(const QString& tag, const QString& number,
             table->item(r, 1)->setText(productCode);
         if (!name.isEmpty() && table->item(r, 2))
             table->item(r, 2)->setText(name);
+    } else if (tag == "BAR") {
+        // BAR rows display the row index as "Barcode #" (col 0) and the
+        // barcode string as "Barcode data" (col 1).  For a new BAR row the
+        // barcode data field starts blank (cleared in addRowToSection), so
+        // only an empty name is ignored — a real barcode string is always
+        // written.  Map CLI arguments the same way the Save overlay does:
+        // number -> col 0 (barcode #), name -> col 1 (barcode data).
+        if (!number.isEmpty() && table->item(r, 0))
+            table->item(r, 0)->setText(number);
+        if (!name.isEmpty() && table->item(r, 1))
+            table->item(r, 1)->setText(name);
     } else {
         // Sections: the identity/code column is col 0, value col is col 1.
         if (!productCode.isEmpty() && table->item(r, 0))
@@ -967,6 +1005,24 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
                                            + item->text().split('\t', Qt::KeepEmptyParts);
                             }
                         }
+                    }
+                } else if (tag == "BAR") {
+                    // BAR rows store the barcode string in a fixed later field
+                    // (token[offset+5] in the files we have seen).  Col 0 of the
+                    // table is "Barcode #" (the row index, token[offset]); col 1
+                    // is "Barcode data" (token[offset+5]).  Write those two
+                    // fields back and leave the hidden numeric fields (tokens
+                    // offset+1 .. offset+4) untouched so the device-exact format
+                    // survives a round-trip.
+                    if (QTableWidgetItem* item = table->item(r, 0)) {
+                        const int idx = row.offset;              // Barcode # (row index)
+                        if (idx < row.tokens.size())
+                            row.tokens[idx] = item->text();
+                    }
+                    if (QTableWidgetItem* item = table->item(r, 1)) {
+                        const int idx = row.offset + 5;         // barcode data
+                        if (idx < row.tokens.size())
+                            row.tokens[idx] = item->text();
                     }
                 } else {
                     // Extend the token row only where the user actually
