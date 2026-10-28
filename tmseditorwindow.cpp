@@ -73,7 +73,7 @@ void TmsEditorWindow::buildUI()
 
     // ---------- Per‑section default column counts (used by populateTab) ----------
     m_colCount = {
-        {"PLU", 4}, {"DPT", 2}, {"CLS", 2}, {"UNT", 3}, {"BAR", 2},
+        {"PLU", 5}, {"DPT", 2}, {"CLS", 2}, {"UNT", 3}, {"BAR", 2},
         {"TMS", 2}, {"TMR", 1}, {"INF", 2}, {"TMT", 2}, {"REP", 2},
         {"SCP", 3}
     };
@@ -163,7 +163,7 @@ bool TmsEditorWindow::loadFile(const QString& path)
     };
 
     QMap<QString, int> colCount = {
-        {"PLU", 4}, {"DPT", 2}, {"CLS", 2}, {"UNT", 3}, {"BAR", 2},
+        {"PLU", 5}, {"DPT", 2}, {"CLS", 2}, {"UNT", 3}, {"BAR", 2},
         {"TMS", 2}, {"TMR", 1}, {"INF", 2}, {"TMT", 2}, {"REP", 2},
         {"SCP", 3}
     };
@@ -330,11 +330,13 @@ QVector<QString> buildDisplayRow(const QString& tag, const QStringList& tokens,
                                                      : tokens.value(base + 1);
         const QString name   = (nameIdx >= 0) ? tokens.at(nameIdx)
                                               : tokens.value(base + 1);
+        // The stored price sits before the name, at base + 4 (e.g. 799,2).
+        const QString price  = (nameIdx > base + 4) ? tokens.value(base + 4) : QString();
         QString rest;
         if (nameIdx >= 0 && nameIdx + 1 < tokens.size())
             rest = tokens.mid(nameIdx + 1).join('\t');
 
-        display << number << code << name << rest;
+        display << number << code << name << price << rest;
     } else if (tag == "BAR") {
         // Real DLX-50 BAR rows look like
         //   BAR\t<idx>\t\t0\t0\t0\t0\t<barcode>\t\r
@@ -383,7 +385,7 @@ void TmsEditorWindow::populateTab(const QString& tag, QTableWidget* table)
 {
     QStringList headers;
     if (tag == "PLU")
-        headers << tr("PLU #") << tr("Product code") << tr("Product name") << tr("Rest (weight/price)");
+        headers << tr("PLU #") << tr("Product code") << tr("Product name") << tr("Price (as stored)") << tr("Rest");
     else if (tag == "DPT")
         headers << tr("DPT code") << tr("Value / description");
     else if (tag == "CLS")
@@ -994,6 +996,11 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
                             row.tokens[nameIdx] = item->text();
                     }
                     if (QTableWidgetItem* item = table->item(r, 3)) {
+                        const int idx = row.offset + 4;          // stored price
+                        if (nameIdx > idx && idx < row.tokens.size())
+                            row.tokens[idx] = item->text();
+                    }
+                    if (QTableWidgetItem* item = table->item(r, 4)) {
                         if (nameIdx >= 0) {
                             const QString original = row.tokens.mid(nameIdx + 1).join('\t');
                             if (item->text() != original) {
