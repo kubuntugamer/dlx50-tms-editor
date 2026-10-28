@@ -3,6 +3,7 @@
 #include <QTextStream>
 #include "tmseditorwindow.h"
 #include "updater.h"
+#include "transport.h"
 
 // -------------------------------------------------------------------
 // Headless CLI manipulation mode (issue #6): --list / --add / --delete
@@ -15,6 +16,11 @@
 //                                    an optional header line is skipped)
 //   dlx50-tms-editor FILE.TMS --delete TAG CODE
 // Exit codes: 0 ok · 2 usage error · 3 file/load error · 4 op error.
+//
+// Network scale probe (issue #8): --probe-scale HOST PORT [TIMEOUT]
+//   read-only discovery of what a LAN scale agent exposes; never sends
+//   write/delete/reboot/transfer commands.
+//   Exit codes: 0 probe ran and reported · 2 usage error · 3 probe error
 // -------------------------------------------------------------------
 static void cliUsage(QTextStream& out)
 {
@@ -33,6 +39,9 @@ static void cliUsage(QTextStream& out)
            "  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n"
            "      delete one row by 0-based index\n"
            "  add --save-as PATH to write the result to PATH instead of FILE\n"
+           "  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n"
+           "      read-only network probe: connect, send an 8-byte handshake,\n"
+           "      print what the scale answers (no write/delete/reboot sent)\n"
            "  --version | --no-update-check | --help\n"
         << Qt::endl;
 }
@@ -41,6 +50,11 @@ static bool takesFileToken(const QString& a)
 {
     return a.compare(QLatin1String("--no-update-check"), Qt::CaseInsensitive) == 0
         || a.compare(QLatin1String("--version"), Qt::CaseInsensitive) == 0;
+}
+
+static bool isProbeFlag(const QString& a)
+{
+    return a.compare(QLatin1String("--probe-scale"), Qt::CaseInsensitive) == 0;
 }
 
 int main(int argc, char* argv[])
@@ -86,6 +100,12 @@ int main(int argc, char* argv[])
     bool haveSet = false, haveDeleteRow = false;
     QVector<QString> addVals;           // NUMBER, CODE, NAME
     bool haveList = false, haveAdd = false, haveDelete = false;
+
+    // Network probe (issue #8).
+    bool haveProbe = false;
+    QString probeHost;
+    int probePort = -1;
+    int probeTimeoutMs = 5000;
 
     for (int i = 1; i < argc; ++i) {
         const QString a = argv[i];
@@ -157,6 +177,16 @@ int main(int argc, char* argv[])
             i += 2;
             continue;
         }
+        if (isProbeFlag(a)) {
+            haveProbe = true;
+            if (i + 1 < argc && !QString(argv[i + 1]).startsWith('-'))
+                probeHost = argv[++i];
+            if (i + 1 < argc && !QString(argv[i + 1]).startsWith('-'))
+                probePort = QString(argv[++i]).toInt();
+            if (i + 1 < argc && !QString(argv[i + 1]).startsWith('-'))
+                probeTimeoutMs = QString(argv[++i]).toInt();
+            continue;
+        }
         // --save-as PATH: write the result to PATH instead of the input file.
         if (a.compare(QLatin1String("--save-as"), Qt::CaseInsensitive) == 0) {
             if (i + 1 < argc)
@@ -165,7 +195,72 @@ int main(int argc, char* argv[])
         }
     }
 
-    const bool cliMode = haveList || haveAdd || haveDelete || haveSet || haveDeleteRow;
+    const bool cliMode = haveList || haveAdd || haveDelete || haveSet || haveDeleteRow || haveProbe;
+
+    // Network probe (issue #8): it does not touch any file, so it runs
+    // before the file-loading path and never opens the GUI.
+    if (haveProbe) {
+        if (probeHost.isEmpty() || probePort <= 0) {
+            QTextStream err(stderr);
+            err << "error: --probe-scale HOST PORT [TIMEOUT_MS] required\n" << Qt::endl;
+            cliUsage(err);
+            return 2;
+        }
+        QTextStream out(stdout);
+        out << "dlx50-tms-editor network probe (issue #8)\n"
+            << "  target : " << probeHost << ":" << probePort << "\n"
+            << "  timeout: " << probeTimeoutMs << " ms\n"
+            << "  mode   : read-only (no write/delete/reboot/transfer sent)\n"
+            << Qt::endl;
+
+        NetworkProbeResult result = probeScale(probeHost, probePort, probeTimeoutMs);
+
+        out << "--- connection ---\n";
+        out << "  connected : " << (result.connected ? "yes" : "no") << "\n";
+        out << "  host      : " << result.host << "\n";
+        out << "  port      : " << result.port << "\n";
+        out << Qt::endl;
+
+        out << "--- observations ---\n";
+        for (const QString& o : result.observations)
+            out << "  " << o << "\n";
+        out << Qt::endl;
+
+        out << "--- captured response ---\n";
+        if (result.rawBytes.isEmpty()) {
+            out << "  (no bytes received)\n";
+        } else {
+            out << "  bytes    : " << result.rawBytes.size() << "\n";
+            out << "  hex       : " << result.rawBytes.toHex().constData() << "\n";
+            if (!result.rawResponse.isEmpty()) {
+                out << "  utf8      : \"" << result.rawResponse << "\"\n";
+            } else if (!result.rawBytes.isEmpty()) {
+                out << "  utf8      : (not valid UTF-8 — see hex above)\n";
+            }
+            if (!result.lines.isEmpty()) {
+                out << "  lines     :\n";
+                for (const QString& l : result.lines)
+                    out << "    | " << l << "\n";
+            }
+        }
+        out << Qt::endl;
+
+        out << "--- summary for issue #8 ---\n";
+        out << result.summary << "\n";
+        out << Qt::endl;
+
+        out << "--- next steps (paste into issue #7/8) ---\n";
+        out << "  - target   : " << result.host << ":" << result.port << "\n";
+        out << "  - connected: " << (result.connected ? "yes" : "no") << "\n";
+        out << "  - bytes    : " << result.rawBytes.size() << "\n";
+        if (!result.rawBytes.isEmpty())
+            out << "  - hex      : " << result.rawBytes.toHex().constData() << "\n";
+        out << "  - probe    : read-only, no write/delete/reboot/transfer sent\n";
+        out << Qt::endl;
+
+        return result.connected ? 0 : 3;
+    }
+
     if (!cliMode) {
         // GUI mode: first non-flag argument is the file to open.
         QString filePath;

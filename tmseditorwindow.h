@@ -12,7 +12,16 @@ class QMenu;
 class QAction;
 class QMenuBar;
 class QStatusBar;
+class QDialog;
+class QFileDialog;
+class QMessageBox;
+class QListWidget;
+class QLabel;
+class QProgressBar;
+class QCheckBox;
 class Updater;
+class TransportBackend;
+class TransportRegistry;
 
 class TmsEditorWindow : public QMainWindow
 {
@@ -67,6 +76,12 @@ public slots:
     // Save to a path without a dialog, with the same backup rules as Save As.
     bool saveToPathForCli(const QString& path, QString* errOut);
 
+    // Transport (issues #7/#8): retrieve/upload .TMS files from/to the scale
+    // through the registered TransportBackend implementations.
+    void retrieveFromScale();
+    void uploadToScale();
+    void probeScaleReadonly();
+
 private slots:
     void onCellChanged();
 
@@ -111,4 +126,7 @@ private:
     // Lines that are not part of any DWL…END section are kept verbatim;
     // each DWL…END section is reconstructed from its table.
     QString rebuildFullContentFromTables();
+
+    // Transport UI helper: local path for a file retrieved from the scale.
+    QString retrievedFileLocalPath(const QString& remoteName) const;
 };

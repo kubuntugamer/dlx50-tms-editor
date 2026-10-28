@@ -1,6 +1,7 @@
 #include "tmseditorwindow.h"
 
 #include "updater.h"
+#include "transport.h"
 
 #include <QApplication>
 #include <QMainWindow>
@@ -31,6 +32,17 @@
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QTimer>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QListWidget>
+#include <QClipboard>
+#include <QTextEdit>
+#include <QLabel>
+#include <QProgressBar>
+#include <QCheckBox>
+#include <QGroupBox>
+#include <QGridLayout>
+#include <QFormLayout>
 #include <algorithm>
 
 
@@ -115,7 +127,8 @@ void TmsEditorWindow::buildUI()
         if (!m_updater)
             m_updater = new Updater(this);
         m_updater->checkForUpdates(this, true);
-    });    QAction* aboutAction = helpMenu->addAction(tr("About"));
+    });
+    QAction* aboutAction = helpMenu->addAction(tr("About"));
     connect(aboutAction, &QAction::triggered, [this]() {
         QMessageBox::about(this, tr("About"),
             tr("TMS / DLX‑50‑style Editor v%1\n"
@@ -123,6 +136,30 @@ void TmsEditorWindow::buildUI()
                "Qt C++ (Qt Creator 6) build.")
                .arg(Updater::currentVersion()));
     });
+
+    // ---------- Transport sub-menu (issues #7/#8) ----------
+    // "Retrieve from scale" and "Upload to scale" dispatch to the registered
+    // TransportBackend implementations. Right now all backends are stubs that
+    // report "not implemented yet" until the scale's protocol is known from
+    // the read-only probe (issue #8).
+    QMenu* transportMenu = fileMenu->addMenu(tr("Scale…"));
+    transportMenu->setToolTip(
+        tr("Retrieve or upload .TMS files between this computer and the "
+           "DLX‑50 scale over USB, serial, or network."));
+
+    QAction* retrieveAction = transportMenu->addAction(tr("Retrieve from scale…"));
+    connect(retrieveAction, &QAction::triggered, this, &TmsEditorWindow::retrieveFromScale);
+
+    QAction* uploadAction = transportMenu->addAction(tr("Upload to scale…"));
+    connect(uploadAction, &QAction::triggered, this, &TmsEditorWindow::uploadToScale);
+
+    transportMenu->addSeparator();
+    QAction* probeAction = transportMenu->addAction(
+        tr("Probe scale (read-only, issue #8)…"));
+    probeAction->setToolTip(
+        tr("Open a read-only connection to the scale agent and capture its "
+           "response, without sending any write/delete/reboot/transfer command."));
+    connect(probeAction, &QAction::triggered, this, &TmsEditorWindow::probeScaleReadonly);
 }
 
 // ----------------------------------------------------------------
@@ -314,6 +351,7 @@ int findPluNameIdx(const QStringList& tokens, int base)
     }
     return -1;
 }
+
 
 // The table-cell texts for a stored token row — the single source of truth
 // shared by populateTab (loading), addRowToSection (new row drafts) and the
@@ -984,6 +1022,530 @@ void TmsEditorWindow::saveFileAs()
     if (!bakPath.isEmpty())
         msg += tr("  (backup: %1)").arg(QFileInfo(bakPath).fileName());
     statusBar()->showMessage(msg);
+}
+
+// ----------------------------------------------------------------
+// File -> Scale > Retrieve from scale
+// ----------------------------------------------------------------
+void TmsEditorWindow::retrieveFromScale()
+{
+    // Need a file loaded first — the retrieved .TMS is opened in the editor
+    // after download, so the user can edit it.
+    if (!m_fileLoaded) {
+        QMessageBox::information(this, tr("Retrieve from scale"),
+            tr("Open or create a .TMS file first, then use Retrieve from scale "
+               "to download a file from the scale into the editor."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Retrieve .TMS from scale"));
+    dialog.setModal(true);
+    dialog.resize(520, 360);
+
+    QGridLayout* layout = new QGridLayout(&dialog);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    int row = 0;
+    layout->addWidget(new QLabel(tr("Choose the transport to use:"), &dialog), row, 0, 1, 2);
+    ++row;
+
+    // Backend chooser — populated from TransportRegistry. Backends that are
+    // not usable on this machine are shown but disabled.
+    QListWidget* backendList = new QListWidget(&dialog);
+    backendList->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    const QList<TransportBackend*> backends = TransportRegistry::availableBackends();
+    for (TransportBackend* b : backends) {
+        QListWidgetItem* item = new QListWidgetItem(b->name(), backendList);
+        item->setData(Qt::UserRole, quintptr(b));
+        if (!b->isUsable())
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+    }
+    if (backends.isEmpty()) {
+        QListWidgetItem* item = new QListWidgetItem(
+            tr("No transport backends available — build with a transport backend"),
+            backendList);
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+    }
+    layout->addWidget(backendList, row, 0, 1, 2);
+    ++row;
+
+    // Probe first checkbox — for network backends, offer to run the read-only
+    // probe before retrieving, so the user can confirm the scale is reachable.
+    QCheckBox* probeFirst = new QCheckBox(
+        tr("Run read-only probe first (network only)…"), &dialog);
+    probeFirst->setChecked(true);
+    layout->addWidget(probeFirst, row, 0, 1, 2);
+    ++row;
+
+    QLabel* statusLabel = new QLabel(&dialog);
+    statusLabel->setWordWrap(true);
+    layout->addWidget(statusLabel, row, 0, 1, 2);
+    ++row;
+
+    QProgressBar* progress = new QProgressBar(&dialog);
+    progress->setVisible(false);
+    layout->addWidget(progress, row, 0, 1, 2);
+    ++row;
+
+    QDialogButtonBox* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dialog);
+    layout->addWidget(buttons, row, 0, 1, 2);
+
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    bool ok = dialog.exec() == QDialog::Accepted;
+    if (!ok) return;
+
+    QListWidgetItem* sel = backendList->currentItem();
+    if (!sel) {
+        QMessageBox::information(this, tr("Retrieve from scale"),
+            tr("No transport selected."));
+        return;
+    }
+    TransportBackend* backend = reinterpret_cast<TransportBackend*>(
+        sel->data(Qt::UserRole).value<quintptr>());
+    if (!backend) {
+        QMessageBox::information(this, tr("Retrieve from scale"),
+            tr("Selected transport is not available."));
+        return;
+    }
+
+    statusLabel->setText(tr("Connecting to %1…").arg(backend->name()));
+    qApp->processEvents();
+
+    // TODO: once listFiles() is implemented on the network backend, list the
+    // available .TMS files here and let the user pick one to download.
+    QList<TransportFile> files;
+    TransportResult listResult = backend->listFiles(&files);
+    if (listResult.status != TransportResult::Status::Ok
+            && listResult.status != TransportResult::Status::NotSupported) {
+        QMessageBox::warning(this, tr("Retrieve from scale"),
+            tr("Could not list files on the scale:\n%1").arg(listResult.detail));
+        return;
+    }
+
+    if (listResult.status == TransportResult::Status::NotSupported) {
+        QMessageBox::information(this, tr("Retrieve from scale"),
+            tr("The %1 transport does not support listing files yet.\n\n"
+               "%2")
+                .arg(backend->name(), listResult.detail));
+        return;
+    }
+
+    if (files.isEmpty()) {
+        QMessageBox::information(this, tr("Retrieve from scale"),
+            tr("No .TMS files found on the scale via %1.").arg(backend->name()));
+        return;
+    }
+
+    // Build a file chooser from the listed files.
+    QDialog fileDialog(this);
+    fileDialog.setWindowTitle(tr("Choose file to retrieve"));
+    fileDialog.setModal(true);
+    fileDialog.resize(420, 260);
+
+    QGridLayout* fLayout = new QGridLayout(&fileDialog);
+    fLayout->setContentsMargins(12, 12, 12, 12);
+    fLayout->setSpacing(8);
+
+    int fr = 0;
+    fLayout->addWidget(new QLabel(tr("Available .TMS files on the scale:"), &fileDialog), fr, 0, 1, 2);
+    ++fr;
+
+    QListWidget* fileList = new QListWidget(&fileDialog);
+    for (const TransportFile& f : files) {
+        QListWidgetItem* item = new QListWidgetItem(
+            QString("%1  (%2 bytes)").arg(f.localName).arg(f.size), fileList);
+        item->setData(Qt::UserRole, f.remotePath);
+    }
+    fLayout->addWidget(fileList, fr, 0, 1, 2);
+    ++fr;
+
+    QDialogButtonBox* fButtons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &fileDialog);
+    fLayout->addWidget(fButtons, fr, 0, 1, 2);
+
+    connect(fButtons, &QDialogButtonBox::accepted, &fileDialog, &QDialog::accept);
+    connect(fButtons, &QDialogButtonBox::rejected, &fileDialog, &QDialog::reject);
+
+    if (fileDialog.exec() != QDialog::Accepted) return;
+
+    QListWidgetItem* fileSel = fileList->currentItem();
+    if (!fileSel) return;
+
+    QString remotePath = fileSel->data(Qt::UserRole).toString();
+    QString localPath = retrievedFileLocalPath(files.at(fileList->row(fileSel)).localName);
+    if (localPath.isNull()) return;
+
+    progress->setVisible(true);
+    progress->setRange(0, 0);
+    statusLabel->setText(tr("Retrieving %1…").arg(files.at(fileList->row(fileSel)).localName));
+    qApp->processEvents();
+
+    TransportResult retrieveResult = backend->retrieveFile(remotePath, localPath);
+    progress->setVisible(false);
+
+    if (retrieveResult.status == TransportResult::Status::Ok) {
+        QMessageBox::information(this, tr("Retrieve from scale"),
+            tr("Retrieved %1 to:\n%2")
+                .arg(files.at(fileList->row(fileSel)).localName)
+                .arg(localPath));
+        loadFile(localPath);
+    } else {
+        QMessageBox::warning(this, tr("Retrieve from scale"),
+            tr("Could not retrieve %1:\n%2")
+                .arg(files.at(fileList->row(fileSel)).localName)
+                .arg(retrieveResult.detail));
+    }
+}
+
+// ----------------------------------------------------------------
+// File -> Scale > Upload to scale
+// ----------------------------------------------------------------
+void TmsEditorWindow::uploadToScale()
+{
+    // Sanity: there should be a file loaded to upload.
+    if (!m_fileLoaded || m_currentFilePath.isEmpty()) {
+        QMessageBox::information(this, tr("Upload to scale"),
+            tr("Open a .TMS file first, then use Upload to scale to send the "
+               "edited file back to the scale."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Upload .TMS to scale"));
+    dialog.setModal(true);
+    dialog.resize(520, 320);
+
+    QGridLayout* layout = new QGridLayout(&dialog);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    int row = 0;
+    layout->addWidget(new QLabel(
+        tr("Uploading: %1").arg(QFileInfo(m_currentFilePath).fileName()),
+        &dialog), row, 0, 1, 2);
+    ++row;
+
+    layout->addWidget(new QLabel(tr("Choose the transport to use:"), &dialog), row, 0, 1, 2);
+    ++row;
+
+    QListWidget* backendList = new QListWidget(&dialog);
+    const QList<TransportBackend*> backends = TransportRegistry::availableBackends();
+    for (TransportBackend* b : backends) {
+        QListWidgetItem* item = new QListWidgetItem(b->name(), backendList);
+        item->setData(Qt::UserRole, quintptr(b));
+        if (!b->isUsable())
+            item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+    }
+    if (backends.isEmpty()) {
+        QListWidgetItem* item = new QListWidgetItem(
+            tr("No transport backends available."), backendList);
+        item->setFlags(item->flags() & ~Qt::ItemIsEnabled);
+    }
+    layout->addWidget(backendList, row, 0, 1, 2);
+    ++row;
+
+    QLabel* statusLabel = new QLabel(&dialog);
+    statusLabel->setWordWrap(true);
+    layout->addWidget(statusLabel, row, 0, 1, 2);
+    ++row;
+
+    QProgressBar* progress = new QProgressBar(&dialog);
+    progress->setVisible(false);
+    layout->addWidget(progress, row, 0, 1, 2);
+    ++row;
+
+    QDialogButtonBox* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dialog);
+    layout->addWidget(buttons, row, 0, 1, 2);
+
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    bool ok = dialog.exec() == QDialog::Accepted;
+    if (!ok) return;
+
+    QListWidgetItem* sel = backendList->currentItem();
+    if (!sel) {
+        QMessageBox::information(this, tr("Upload to scale"),
+            tr("No transport selected."));
+        return;
+    }
+    TransportBackend* backend = reinterpret_cast<TransportBackend*>(
+        sel->data(Qt::UserRole).value<quintptr>());
+    if (!backend) {
+        QMessageBox::information(this, tr("Upload to scale"),
+            tr("Selected transport is not available."));
+        return;
+    }
+
+    // For network, the remote path is typically the scale's .TMS filename
+    // (e.g. A_000.TMS). Let the user confirm or edit it.
+    QString remotePath = QFileInfo(m_currentFilePath).fileName();
+
+    if (backend->name().contains("Network", Qt::CaseInsensitive)) {
+        QDialog remoteDialog(this);
+        remoteDialog.setWindowTitle(tr("Upload to scale (network)"));
+        remoteDialog.setModal(true);
+        remoteDialog.resize(420, 140);
+
+        QGridLayout* rLayout = new QGridLayout(&remoteDialog);
+        rLayout->setContentsMargins(12, 12, 12, 12);
+        rLayout->setSpacing(8);
+
+        int rr = 0;
+        rLayout->addWidget(new QLabel(
+            tr("Remote .TMS path on the scale (e.g. A_000.TMS):"), &remoteDialog), rr, 0, 1, 2);
+        ++rr;
+
+        QLineEdit* remoteEdit = new QLineEdit(remotePath, &remoteDialog);
+        remoteEdit->setReadOnly(false);
+        rLayout->addWidget(remoteEdit, rr, 0, 1, 2);
+        ++rr;
+
+        QDialogButtonBox* rButtons = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &remoteDialog);
+        rLayout->addWidget(rButtons, rr, 0, 1, 2);
+
+        connect(rButtons, &QDialogButtonBox::accepted, &remoteDialog, &QDialog::accept);
+        connect(rButtons, &QDialogButtonBox::rejected, &remoteDialog, &QDialog::reject);
+
+        if (remoteDialog.exec() != QDialog::Accepted) return;
+        remotePath = remoteEdit->text().trimmed();
+        if (remotePath.isEmpty()) {
+            QMessageBox::information(this, tr("Upload to scale"),
+                tr("Remote path must not be empty."));
+            return;
+        }
+    }
+
+    statusLabel->setText(tr("Uploading to %1…").arg(backend->name()));
+    qApp->processEvents();
+
+    progress->setVisible(true);
+    progress->setRange(0, 0);
+
+    TransportResult uploadResult = backend->uploadFile(m_currentFilePath, remotePath);
+    progress->setVisible(false);
+
+    if (uploadResult.status == TransportResult::Status::Ok) {
+        QMessageBox::information(this, tr("Upload to scale"),
+            tr("Uploaded %1 to %2 via %3.")
+                .arg(QFileInfo(m_currentFilePath).fileName())
+                .arg(remotePath)
+                .arg(backend->name()));
+        statusBar()->showMessage(tr("Uploaded to scale: %1").arg(remotePath));
+    } else {
+        QMessageBox::warning(this, tr("Upload to scale"),
+            tr("Could not upload %1 via %2:\n%3")
+                .arg(QFileInfo(m_currentFilePath).fileName())
+                .arg(backend->name())
+                .arg(uploadResult.detail));
+    }
+}
+
+// ----------------------------------------------------------------
+// File -> Scale > Probe scale (read-only, issue #8)
+// ----------------------------------------------------------------
+void TmsEditorWindow::probeScaleReadonly()
+{
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Probe scale agent (read-only)"));
+    dialog.setModal(true);
+    dialog.resize(560, 520);
+
+    QGridLayout* layout = new QGridLayout(&dialog);
+    layout->setContentsMargins(12, 12, 12, 12);
+    layout->setSpacing(8);
+
+    int row = 0;
+    QGroupBox* targetBox = new QGroupBox(tr("Target"), &dialog);
+    QGridLayout* tLayout = new QGridLayout(targetBox);
+    tLayout->setContentsMargins(8, 8, 8, 8);
+    tLayout->setSpacing(6);
+
+    int tr_ = 0;
+    tLayout->addWidget(new QLabel(tr("Host:"), targetBox), tr_, 0);
+    QLineEdit* hostEdit = new QLineEdit(tr("10.86.215.95"), targetBox);
+    tLayout->addWidget(hostEdit, tr_, 1);
+    ++tr_;
+
+    tLayout->addWidget(new QLabel(tr("Port:"), targetBox), tr_, 0);
+    QLineEdit* portEdit = new QLineEdit("9100", targetBox);
+    portEdit->setValidator(new QIntValidator(1, 65535, targetBox));
+    tLayout->addWidget(portEdit, tr_, 1);
+    ++tr_;
+
+    tLayout->addWidget(new QLabel(tr("Timeout (ms):"), targetBox), tr_, 0);
+    QLineEdit* timeoutEdit = new QLineEdit("10000", targetBox);
+    timeoutEdit->setValidator(new QIntValidator(500, 60000, targetBox));
+    tLayout->addWidget(timeoutEdit, tr_, 1);
+    ++tr_;
+
+    layout->addWidget(targetBox, row, 0, 1, 2);
+    ++row;
+
+    QGroupBox* probeBox = new QGroupBox(tr("Probe payload (issue #8)"), &dialog);
+    QGridLayout* pLayout = new QGridLayout(probeBox);
+    pLayout->setContentsMargins(8, 8, 8, 8);
+    pLayout->setSpacing(6);
+
+    int pr = 0;
+    pLayout->addWidget(new QLabel(
+        tr("The probe sends an 8-byte read-only handshake and captures whatever "
+           "the scale returns. No write/delete/reboot/transfer command is sent."),
+        probeBox), pr, 0, 1, 2);
+    ++pr;
+
+    QLabel* payloadLabel = new QLabel(
+        tr("Current probe payload (hex, 8 bytes): 53 43 41 4C 01 00 00 00"), probeBox);
+    payloadLabel->setWordWrap(true);
+    pLayout->addWidget(payloadLabel, pr, 0, 1, 2);
+    ++pr;
+
+    layout->addWidget(probeBox, row, 0, 1, 2);
+    ++row;
+
+    QCheckBox* copyToClipboard = new QCheckBox(
+        tr("Copy result to clipboard for pasting into issue #7/#8"), &dialog);
+    copyToClipboard->setChecked(true);
+    layout->addWidget(copyToClipboard, row, 0, 1, 2);
+    ++row;
+
+    QLabel* statusLabel = new QLabel(&dialog);
+    statusLabel->setWordWrap(true);
+    layout->addWidget(statusLabel, row, 0, 1, 2);
+    ++row;
+
+    QProgressBar* progress = new QProgressBar(&dialog);
+    progress->setVisible(false);
+    progress->setFormat(tr("Probing…"));
+    layout->addWidget(progress, row, 0, 1, 2);
+    ++row;
+
+    QTextEdit* resultEdit = new QTextEdit(&dialog);
+    resultEdit->setReadOnly(true);
+    resultEdit->setFont(QFont("Monospace", 9));
+    resultEdit->setMinimumHeight(160);
+    layout->addWidget(resultEdit, row, 0, 1, 2);
+    ++row;
+
+    QDialogButtonBox* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+        Qt::Horizontal, &dialog);
+    QPushButton* runBtn = buttons->addButton(tr("Run probe"), QDialogButtonBox::ActionRole);
+    layout->addWidget(buttons, row, 0, 1, 2);
+
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    QObject::connect(runBtn, &QPushButton::clicked,
+        [=]() {
+        bool okHost = false, okPort = false, okTimeout = false;
+        const QString host = hostEdit->text().trimmed();
+        const int port = portEdit->text().toInt(&okPort);
+        const int timeoutMs = timeoutEdit->text().toInt(&okTimeout);
+        if (host.isEmpty()) {
+            statusLabel->setText(tr("Host must not be empty."));
+            return;
+        }
+        if (!okPort || port <= 0 || port > 65535) {
+            statusLabel->setText(tr("Port must be 1..65535."));
+            return;
+        }
+        if (!okTimeout || timeoutMs < 500) {
+            statusLabel->setText(tr("Timeout must be >= 500 ms."));
+            return;
+        }
+
+        statusLabel->setText(tr("Probing %1:%2 …").arg(host).arg(port));
+        progress->setVisible(true);
+        progress->setFormat(tr("Connecting…"));
+        qApp->processEvents();
+
+        NetworkProbeResult result = probeScale(host, port, timeoutMs);
+
+        QString output;
+        output += QString("dlx50-tms-editor network probe (issue #8)\n");
+        output += QString("  target : %1:%2\n").arg(result.host).arg(result.port);
+        output += QString("  timeout: %1 ms\n").arg(result.timeoutMs);
+        output += QString("  mode   : read-only (no write/delete/reboot/transfer sent)\n");
+        output += QString("\n");
+        output += QString("--- connection ---\n");
+        output += QString("  connected : %1\n").arg(result.connected ? "yes" : "no");
+        output += QString("  host      : %1\n").arg(result.host);
+        output += QString("  port      : %1\n").arg(result.port);
+        output += QString("\n");
+        output += QString("--- observations ---\n");
+        for (const QString& o : result.observations)
+            output += QString("  %1\n").arg(o);
+        output += QString("\n");
+        output += QString("--- captured response ---\n");
+        if (result.rawBytes.isEmpty()) {
+            output += QString("  (no bytes received)\n");
+        } else {
+            output += QString("  bytes    : %1\n").arg(result.rawBytes.size());
+            output += QString("  hex       : %1\n").arg(result.rawBytes.toHex().constData());
+            if (!result.rawResponse.isEmpty())
+                output += QString("  utf8      : \"%1\"\n").arg(result.rawResponse);
+            else if (!result.rawBytes.isEmpty())
+                output += QString("  utf8      : (not valid UTF-8 — see hex above)\n");
+            if (!result.lines.isEmpty()) {
+                output += QString("  lines     :\n");
+                for (const QString& l : result.lines)
+                    output += QString("    | %1\n").arg(l);
+            }
+        }
+        output += QString("\n");
+        output += QString("--- summary for issue #8 ---\n");
+        output += result.summary;
+        output += QString("\n");
+        output += QString("--- next steps (paste into issue #7/#8) ---\n");
+        output += QString("  - target   : %1:%2\n").arg(result.host).arg(result.port);
+        output += QString("  - connected: %1\n").arg(result.connected ? "yes" : "no");
+        output += QString("  - bytes    : %1\n").arg(result.rawBytes.size());
+        if (!result.rawBytes.isEmpty())
+            output += QString("  - hex      : %1\n").arg(result.rawBytes.toHex().constData());
+        output += QString("  - probe    : read-only, no write/delete/reboot/transfer sent\n");
+
+        resultEdit->setPlainText(output);
+        statusLabel->setText(tr("Probe complete."));
+        progress->setVisible(false);
+
+        if (copyToClipboard->isChecked())
+            QApplication::clipboard()->setText(output);
+    });
+
+    dialog.exec();
+}
+
+// ----------------------------------------------------------------
+// Helper: local path to save a retrieved file into, next to the current file.
+// ----------------------------------------------------------------
+QString TmsEditorWindow::retrievedFileLocalPath(const QString& remoteName) const
+{
+    if (m_currentFilePath.isEmpty())
+        return QDir::home().filePath(remoteName);
+
+    QString dir = QFileInfo(m_currentFilePath).absolutePath();
+    QString candidate = dir + QLatin1Char('/') + remoteName;
+    if (!QFile::exists(candidate))
+        return candidate;
+
+    // If a file with that name already exists locally, suggest a numbered copy.
+    int n = 1;
+    forever {
+        candidate = dir + QLatin1Char('/') + QString("%1_%2.TMS")
+                        .arg(QFileInfo(remoteName).baseName())
+                        .arg(n);
+        if (!QFile::exists(candidate))
+            return candidate;
+        ++n;
+        if (n > 1000) return QDir::home().filePath(remoteName);
+    }
 }
 
 // ----------------------------------------------------------------

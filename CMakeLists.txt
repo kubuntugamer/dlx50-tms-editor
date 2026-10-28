@@ -13,9 +13,14 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
+# ---- Options ----
+option(BUILD_TESTS "Build tests" ON)
+option(BUILD_SHELL_INTEGRATION "Build shell integration (e.g. sudoers helper)" OFF)
+
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
-add_executable(tms_editor main.cpp tmseditorwindow.cpp updater.cpp)
+# ---- Main executable ----
+add_executable(tms_editor main.cpp tmseditorwindow.cpp updater.cpp transport.cpp)
 
 target_include_directories(tms_editor PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_compile_definitions(tms_editor PRIVATE APP_VERSION="${TMS_APP_VERSION}")
@@ -28,9 +33,19 @@ set_target_properties(tms_editor PROPERTIES WIN32_EXECUTABLE TRUE)
 
 install(TARGETS tms_editor DESTINATION bin)
 
-# Headless byte-exact round-trip check (not installed). Usage:
-#   roundtrip_check <reference.TMS> [scratch-dir]
-add_executable(roundtrip_check tests/roundtrip_check.cpp tmseditorwindow.cpp updater.cpp)
-target_include_directories(roundtrip_check PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(roundtrip_check PRIVATE APP_VERSION="${TMS_APP_VERSION}")
-target_link_libraries(roundtrip_check PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
+# ---- Headless byte-exact round-trip check (not installed) ----
+# Usage: roundtrip_check <reference.TMS> [scratch-dir]
+if(BUILD_TESTS)
+    add_executable(roundtrip_check tests/roundtrip_check.cpp tmseditorwindow.cpp updater.cpp transport.cpp)
+    target_include_directories(roundtrip_check PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(roundtrip_check PRIVATE APP_VERSION="${TMS_APP_VERSION}")
+    target_link_libraries(roundtrip_check PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
+    install(TARGETS roundtrip_check DESTINATION bin OPTIONAL)
+endif()
+
+# ---- Packaging helpers (optional) ----
+if(BUILD_SHELL_INTEGRATION AND UNIX AND NOT APPLE)
+    install(FILES packaging/dlx50-tms-editor-sudoers
+            DESTINATION .
+            OPTIONAL)
+endif()

@@ -69,6 +69,37 @@ tms_editor FILE.TMS --delete PLU 4099     # matches product code (or PLU #)
 > font; CJK characters render as `?` on the label. Chinese product names
 > belong on the POS/back-office side, which fonts it from the system.
 
+## Scale transfer (work in progress, issues #7/#8)
+
+The editor can talk to the scale itself — retrieve a `.TMS` from it, push an
+edited one back — over USB, serial or the network:
+
+- **File → Scale… → Retrieve from scale…** lists the `.TMS` files a transport
+  reports and downloads the chosen one straight into the editor.
+- **File → Scale… → Upload to scale…** sends the file you are editing to the
+  scale (for the network transport you can confirm the remote name, e.g.
+  `A_000.TMS`).
+- **File → Scale… → Probe scale (read-only, issue #8)…** opens a connection to
+  the scale agent, sends one 8-byte handshake, prints the reply as hex + text
+  and copies the result to the clipboard, ready to paste into the tracking
+  issue. It never sends a write, delete, reboot or transfer command.
+
+The transport backends are picked from a registry; USB and serial are
+placeholders for now, and the network backend reports "not implemented yet"
+until the scale's protocol has been discovered with the probe.
+
+The same probe is available headless:
+
+```bash
+tms_editor --probe-scale 10.86.215.95 9100          # default 5 s timeout
+tms_editor --probe-scale 10.86.215.95 9100 10000    # timeout in ms
+```
+
+It prints the connection state, every observation, the raw response (hex and
+UTF‑8) and a paste-ready summary. Exit codes: `0` probe ran and reported ·
+`2` usage error · `3` could not connect. Headless, like the editing commands
+above, it opens no window.
+
 ## Saving (DLX‑50 behaviour)
 
 - **Ctrl+S (Save)** — copies the current file to `<file>.BAK`, then writes
