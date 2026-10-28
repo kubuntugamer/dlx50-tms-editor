@@ -144,4 +144,27 @@ cp "$WORK/layoutB.TMS" "$WORK/lbplu.TMS"
 cmp -s "$WORK/layoutB.TMS" "$WORK/lbplu.TMS" \
   && ok "layout B: PLU add+delete is byte-identical" || bad "layout B: PLU add+delete changed the file"
 
+# 11) Issue #10: a product code the file cannot store must fail loudly
+#     instead of exiting 0 and silently dropping the value.
+cp "$WORK/layoutB.TMS" "$WORK/lbcode.TMS"
+if "$E" "$WORK/lbcode.TMS" --add PLU 3 4126 "Coded Widget" $N > /dev/null 2> "$WORK/err.txt"; then
+  bad "layout B: --add with a product code should have failed"
+else
+  ok "layout B: --add with a product code refused"
+fi
+cmp -s "$WORK/layoutB.TMS" "$WORK/lbcode.TMS" \
+  && ok "layout B: refused add left the file unchanged" || bad "layout B: refused add wrote to the file"
+grep -qi "product code" "$WORK/err.txt" \
+  && ok "layout B: refusal names the missing code field" || bad "layout B: refusal message unclear"
+
+cp "$WORK/layoutB.TMS" "$WORK/lbcsv.TMS"
+printf 'code,name\n5001,Csv Item\n' > "$WORK/b.csv"
+if "$E" "$WORK/lbcsv.TMS" --add PLU --csv "$WORK/b.csv" $N > /dev/null 2>&1; then
+  bad "layout B: --csv carrying a code column should have failed"
+else
+  ok "layout B: --csv carrying a code column refused"
+fi
+cmp -s "$WORK/layoutB.TMS" "$WORK/lbcsv.TMS" \
+  && ok "layout B: refused csv left the file unchanged" || bad "layout B: refused csv wrote to the file"
+
 exit $fail

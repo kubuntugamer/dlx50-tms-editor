@@ -750,6 +750,26 @@ bool TmsEditorWindow::addRowForCli(const QString& tag, const QString& number,
     // Overrides, mapped the same way the Save overlay maps display cells
     // onto stored tokens. Empty string = keep the cloned default.
     if (tag == "PLU") {
+        // Some files carry no product-code field at all — the name follows
+        // the PLU number directly — and the Save overlay refuses to write a
+        // code there so it cannot clobber the name. Fail loudly instead of
+        // reporting success and dropping the value (issue #10).
+        if (!productCode.isEmpty()) {
+            const int off    = m_rowOffsets.value(tag).value(r, 0);
+            const int codeIdx = off + 1;
+            const int nmIdx  = m_rowNameIdx.value(tag).value(r, -1);
+            const QStringList tokens = m_rowTokens.value(tag).value(r);
+            if (nmIdx == codeIdx || codeIdx >= tokens.size()) {
+                if (errOut) {
+                    *errOut = tr("this file stores no product code on a PLU row "
+                                 "(the name follows the PLU number), so code '%1' "
+                                 "cannot be saved — add without a code, or match "
+                                 "rows by PLU number: --delete PLU <number>")
+                                 .arg(productCode);
+                }
+                return false;
+            }
+        }
         if (!number.isEmpty() && table->item(r, 0))
             table->item(r, 0)->setText(number);
         if (!productCode.isEmpty() && table->item(r, 1))
