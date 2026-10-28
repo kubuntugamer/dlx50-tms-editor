@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# End-to-end check of the headless CLI on a scratch copy of the reference file.
-# Usage: tests/cli_check.sh <tms_editor binary> <reference.TMS>
+# End-to-end check of the headless CLI on scratch copies of reference files.
+# Usage: tests/cli_check.sh <tms_editor binary> [reference.TMS]
+#
+# Without a reference the script generates a synthetic layout-A .TMS itself,
+# so it runs on any machine (no scale file needed).  Either way it also
+# generates a layout-B file at the end — the other real-world row shapes (BAR
+# rows with no blank field after the row index, PLU rows whose name follows
+# the number directly) — so both layouts stay covered.  See issue #9.
 set -u
 E="$1"
-REF="$2"
+REF="${2:-}"
 N="--no-update-check"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -12,7 +18,26 @@ fail=0
 ok()   { echo "ok  : $1"; }
 bad()  { echo "FAIL: $1"; fail=1; }
 
-cp "$REF" "$WORK/ref.TMS"
+if [ -n "$REF" ]; then
+  cp "$REF" "$WORK/ref.TMS"
+else
+  # Synthetic layout-A fixture: BAR rows as
+  #   BAR <idx> <blank> 0 0 0 0 <barcode>, PLU rows with a code field.
+  printf 'HEADER\tDLX50\r\n'                         > "$WORK/ref.TMS"
+  printf 'DWL\tPLU\t\r\n'                            >> "$WORK/ref.TMS"
+  printf 'PLU\t1\t1001\t0\t0\t799,2\tBeef Tendon\t0\t0\t\r\n' >> "$WORK/ref.TMS"
+  printf 'END\tPLU\t\r\n\r\n'                       >> "$WORK/ref.TMS"
+  printf 'DWL\tDPT\t\r\nDPT\t1\tFresh Fruit\t\r\nEND\tDPT\t\r\n\r\n' >> "$WORK/ref.TMS"
+  printf 'DWL\tCLS\t\r\nEND\tCLS\t\r\n\r\n'         >> "$WORK/ref.TMS"
+  printf 'DWL\tUNT\t\r\nEND\tUNT\t\r\n\r\n'         >> "$WORK/ref.TMS"
+  printf 'DWL\tBAR\t\r\n'                            >> "$WORK/ref.TMS"
+  printf 'BAR\t1\t\t0\t0\t0\t0\tB201E500L500A000A000A001\t\r\n' >> "$WORK/ref.TMS"
+  printf 'END\tBAR\t\r\n\r\n'                       >> "$WORK/ref.TMS"
+  printf 'DWL\tTMS\t\r\nEND\tTMS\t\r\n\r\n'         >> "$WORK/ref.TMS"
+  printf 'DWL\tTMT\t\r\nEND\tTMT\t\r\n\r\n'         >> "$WORK/ref.TMS"
+  printf 'DWL\tINF\t\r\nEND\tINF\t\r\n\r\n'         >> "$WORK/ref.TMS"
+  printf 'END\tECS\t\r\n'                            >> "$WORK/ref.TMS"
+fi
 
 # 1) PLU add then delete returns the file to byte-identical state.
 cp "$WORK/ref.TMS" "$WORK/plu.TMS"
@@ -76,5 +101,47 @@ printf 'code,name\n5001,Csv Item\n' > "$WORK/items.csv"
 "$E" "$WORK/csvprice.TMS" --add PLU --csv "$WORK/items.csv" --price 55,5 $N >/dev/null || bad "--add --csv --price exit"
 "$E" "$WORK/csvprice.TMS" --list PLU $N | tail -1 | cut -f4 | grep -q '^55,5$' \
   && ok "--add --csv --price: price stored" || bad "--add --csv --price not stored"
+
+# 10) Layout B: the other real-world row shapes (issue #9).  BAR rows have no
+#     blank field after the row index, so the barcode sits at offset+5 — a
+#     fixed offset+6 read the wrong field (blank barcode column) and wrote a
+#     second one (two barcodes in the row).
+printf 'HEADER\tDLX50\r\n'                           > "$WORK/layoutB.TMS"
+printf 'DWL\tPLU\t\r\n'                              >> "$WORK/layoutB.TMS"
+printf 'PLU\t1\tWidget Alpha\t1\t0\t0\t0\t0\t0\t\r\n' >> "$WORK/layoutB.TMS"
+printf 'PLU\t2\tWidget Beta\t1\t0\t0\t0\t0\t0\t\r\n'  >> "$WORK/layoutB.TMS"
+printf 'END\tPLU\t\r\n\r\n'                         >> "$WORK/layoutB.TMS"
+printf 'DWL\tBAR\t\r\n'                              >> "$WORK/layoutB.TMS"
+printf 'BAR\t1\t0\t0\t0\t0\tB000L000A000A000A000\t\r\n' >> "$WORK/layoutB.TMS"
+printf 'BAR\t2\t0\t0\t0\t0\tB001L001A000A000A000\t\r\n' >> "$WORK/layoutB.TMS"
+printf 'END\tBAR\t\r\n\r\n'                         >> "$WORK/layoutB.TMS"
+printf 'DWL\tDPT\t\r\nEND\tDPT\t\r\n\r\n'           >> "$WORK/layoutB.TMS"
+printf 'DWL\tCLS\t\r\nEND\tCLS\t\r\n\r\n'           >> "$WORK/layoutB.TMS"
+printf 'DWL\tUNT\t\r\nEND\tUNT\t\r\n\r\n'           >> "$WORK/layoutB.TMS"
+printf 'DWL\tTMS\t\r\nEND\tTMS\t\r\n\r\n'           >> "$WORK/layoutB.TMS"
+printf 'DWL\tTMT\t\r\nEND\tTMT\t\r\n\r\n'           >> "$WORK/layoutB.TMS"
+printf 'DWL\tINF\t\r\nEND\tINF\t\r\n\r\n'           >> "$WORK/layoutB.TMS"
+printf 'END\tECS\t\r\n'                              >> "$WORK/layoutB.TMS"
+
+cp "$WORK/layoutB.TMS" "$WORK/lb.TMS"
+"$E" "$WORK/lb.TMS" --list BAR $N >/dev/null || bad "layout B: list BAR exit"
+"$E" "$WORK/lb.TMS" --list BAR $N | tail -1 | cut -f2 | grep -q '^B001L001A000A000A000$' \
+  && ok "layout B: barcode shown in Barcode data column" || bad "layout B: barcode column empty"
+cmp -s "$WORK/layoutB.TMS" "$WORK/lb.TMS" && ok "layout B: --list leaves the file unchanged" || bad "layout B: --list modified the file"
+"$E" "$WORK/lb.TMS" --add BAR 3 "" "B002L002A000A000A000" $N >/dev/null || bad "layout B: add BAR exit"
+grep -q $'^BAR\t3\t0\t0\t0\t0\tB002L002A000A000A000\t' "$WORK/lb.TMS" \
+  && ok "layout B: barcode stored in its own field" || bad "layout B: barcode in the wrong field"
+grep -q $'^BAR\t2\t0\t0\t0\t0\tB001L001A000A000A000\t\r$' "$WORK/lb.TMS" \
+  && ok "layout B: earlier rows keep exactly one barcode" || bad "layout B: an earlier row changed"
+"$E" "$WORK/lb.TMS" --delete-row BAR 2 $N >/dev/null || bad "layout B: delete-row exit"
+cmp -s "$WORK/layoutB.TMS" "$WORK/lb.TMS" \
+  && ok "layout B: add+delete-row is byte-identical" || bad "layout B: add+delete-row changed the file"
+"$E" "$WORK/lb.TMS" --list PLU $N | sed -n 2p | cut -f3 | grep -q '^Widget Alpha$' \
+  && ok "layout B: PLU name column" || bad "layout B: PLU name column"
+cp "$WORK/layoutB.TMS" "$WORK/lbplu.TMS"
+"$E" "$WORK/lbplu.TMS" --add PLU 3 "" "Third Widget" $N >/dev/null || bad "layout B: add PLU exit"
+"$E" "$WORK/lbplu.TMS" --delete PLU 3 $N >/dev/null || bad "layout B: delete PLU by number"
+cmp -s "$WORK/layoutB.TMS" "$WORK/lbplu.TMS" \
+  && ok "layout B: PLU add+delete is byte-identical" || bad "layout B: PLU add+delete changed the file"
 
 exit $fail

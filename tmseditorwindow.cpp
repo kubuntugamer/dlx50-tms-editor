@@ -352,6 +352,32 @@ int findPluNameIdx(const QStringList& tokens, int base)
     return -1;
 }
 
+// Index of the barcode token inside a BAR row (issue #9).  The device puts
+// the barcode after a run of placeholder fields, but the number of those
+// placeholders differs between files we have seen:
+//   BAR <idx> <blank> 0 0 0 0 <barcode> <blank>   (barcode at offset + 6)
+//   BAR <idx> 0 0 0 0 <barcode> <blank>           (barcode at offset + 5)
+// so the slot is detected per row instead of assumed: it is the first
+// non-empty token after the index that is not a plain number (the
+// placeholders are "0"/blank).  When the row carries no barcode yet, the
+// slot is one past the last placeholder — the barcode field in both
+// layouts, and the end of a bootstrapped row.
+int findBarcodeIdx(const QStringList& tokens, int offset)
+{
+    int lastPlaceholder = -1;
+    for (int i = offset + 1; i < tokens.size(); ++i) {
+        const QString& t = tokens.at(i);
+        if (t.isEmpty())
+            continue;
+        bool numeric = false;
+        t.toInt(&numeric);
+        if (numeric)
+            lastPlaceholder = i;
+        else
+            return i;              // the barcode string
+    }
+    return lastPlaceholder + 1;
+}
 
 // The table-cell texts for a stored token row — the single source of truth
 // shared by populateTab (loading), addRowToSection (new row drafts) and the
@@ -378,18 +404,21 @@ QVector<QString> buildDisplayRow(const QString& tag, const QStringList& tokens,
     } else if (tag == "BAR") {
         // Real DLX-50 BAR rows look like
         //   BAR\t<idx>\t\t0\t0\t0\t0\t<barcode>\t\r
-        // (one empty field after the index, then four 0 placeholders),
-        // so with the section tag at token 0 the barcode is at offset + 6. Show the row index
-        // as "Barcode #" and the barcode string as "Barcode data" so the user
-        // can actually see and edit the barcode — the hidden fields are
-        // preserved untouched through load/save (like PLU's weight/price
-        // fields) and survive a round-trip because the save overlay only
-        // touches the two displayed columns.
-        // Show the row index as "Barcode #" and the barcode string as
-        // "Barcode data".  The hidden fields survive a round-trip because the
-        // save overlay below only touches the index and barcode tokens.
-        display << tokens.value(offset);                           // Barcode # (row index)
-        display << (tokens.size() > offset + 6 ? tokens.value(offset + 6) : QString());  // Barcode data
+        // or, in other files we have seen,
+        //   BAR\t<idx>\t0\t0\t0\t0\t<barcode>\t\r
+        // so the barcode slot is detected per row (findBarcodeIdx, stored in
+        // nameIdx) instead of assumed. Show the row index as "Barcode #" and
+        // the barcode string as "Barcode data" so the user can actually see
+        // and edit it — the hidden fields are preserved untouched through
+        // load/save (like PLU's weight/price fields) and survive a
+        // round-trip because the save overlay only touches the two displayed
+        // columns.
+        const int barcodeIdx = (nameIdx >= 0 && nameIdx < tokens.size())
+                                   ? nameIdx
+                                   : (tokens.size() > offset + 6 ? offset + 6
+                                                                 : -1);
+        display << tokens.value(offset);                            // Barcode # (row index)
+        display << (barcodeIdx >= 0 ? tokens.value(barcodeIdx) : QString());  // Barcode data
     } else {
         for (int c = 0; c < cols; ++c)
             display << tokens.value(offset + c);
@@ -475,6 +504,8 @@ void TmsEditorWindow::populateTab(const QString& tag, QTableWidget* table)
 
         if (tag == "PLU")
             nameIndexes.append(findPluNameIdx(row.tokens, row.offset));
+        else if (tag == "BAR")
+            nameIndexes.append(findBarcodeIdx(row.tokens, row.offset));
         else
             nameIndexes.append(-1);
 
@@ -522,7 +553,9 @@ void TmsEditorWindow::addRowToSection(const QString& tag)
         QStringList row{ tag, QStringLiteral("0") };
         tokenRows.append(row);
         m_rowOffsets[tag].append(1);
-        m_rowNameIdx[tag].append(-1);
+        m_rowNameIdx[tag].append(tag == QLatin1String("BAR")
+                                     ? findBarcodeIdx(row, 1)
+                                     : -1);
 
         const int cols = table->columnCount();
         const QVector<QString> display = buildDisplayRow(tag, row, 1, cols, -1);
@@ -575,13 +608,19 @@ void TmsEditorWindow::addRowToSection(const QString& tag)
         if (nameIdx > srcOffset + 1)
             cloned[srcOffset + 1] = QString();
     } else if (tag == "BAR") {
-        // The barcode data lives in a fixed later field (token[offset+6] in
-        // the files we have seen).  Clear it on clone so a newly added BAR
-        // row starts blank and the CLI addRowForCli path (or a manual edit)
-        // can populate it without the template row's barcode sticking.
-        const int barcodeIdx = srcOffset + 6;
-        if (barcodeIdx < cloned.size())
+        // The barcode slot differs per file (findBarcodeIdx) — clear the
+        // source row's slot on clone so a newly added BAR row starts blank
+        // and the CLI addRowForCli path (or a manual edit) can populate it
+        // without the template row's barcode sticking.  Keeping the same
+        // slot index for the new row is what makes Save map col 1 back onto
+        // the right field.
+        const QVector<int>& srcNameIdxs = m_rowNameIdx[tag];
+        const int barcodeIdx = (srcIdx < srcNameIdxs.size() && srcNameIdxs.at(srcIdx) >= 0)
+                                   ? srcNameIdxs.at(srcIdx)
+                                   : findBarcodeIdx(cloned, srcOffset);
+        if (barcodeIdx >= 0 && barcodeIdx < cloned.size())
             cloned[barcodeIdx] = QString();
+        nameIdx = barcodeIdx;
     }
 
     tokenRows.append(cloned);
@@ -1636,22 +1675,33 @@ QString TmsEditorWindow::rebuildFullContentFromTables()
                         }
                     }
                 } else if (tag == "BAR") {
-                    // BAR rows store the barcode string in a fixed later field
-                    // (token[offset+6] in the files we have seen).  Col 0 of the
-                    // table is "Barcode #" (the row index, token[offset]); col 1
-                    // is "Barcode data" (token[offset+6]).  Write those two
-                    // fields back and leave the hidden fields (tokens
-                    // offset+1 .. offset+5) untouched so the device-exact format
-                    // survives a round-trip.
+                    // BAR rows: col 0 is "Barcode #" (the row index,
+                    // token[offset]); col 1 is "Barcode data", whose slot is
+                    // detected per row (findBarcodeIdx, stored in
+                    // nameIndexes) because the placeholder count differs
+                    // between files — writing a fixed offset+6 put the
+                    // barcode one field too far on some files, leaving two
+                    // barcodes in the row (issue #9).  Hidden fields are left
+                    // untouched so the device-exact format survives a
+                    // round-trip.
                     if (QTableWidgetItem* item = table->item(r, 0)) {
                         const int idx = row.offset;              // Barcode # (row index)
                         if (idx < row.tokens.size())
                             row.tokens[idx] = item->text();
                     }
                     if (QTableWidgetItem* item = table->item(r, 1)) {
-                        const int idx = row.offset + 6;         // barcode data
+                        int idx = (r < nameIndexes.size()) ? nameIndexes.at(r) : -1;
+                        if (idx < 0)
+                            idx = row.offset + 6;                // undetected: legacy slot
+                        const QString barcode = item->text();
                         if (idx < row.tokens.size())
-                            row.tokens[idx] = item->text();
+                            row.tokens[idx] = barcode;
+                        else if (!barcode.isEmpty()) {
+                            // Short/bootstrapped row: extend to the slot.
+                            while (row.tokens.size() < idx)
+                                row.tokens.append(QString());
+                            row.tokens.append(barcode);
+                        }
                     }
                 } else {
                     // Extend the token row only where the user actually
