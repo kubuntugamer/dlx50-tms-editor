@@ -27,3 +27,10 @@ target_link_libraries(tms_editor PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Ne
 set_target_properties(tms_editor PROPERTIES WIN32_EXECUTABLE TRUE)
 
 install(TARGETS tms_editor DESTINATION bin)
+
+# Headless byte-exact round-trip check (not installed). Usage:
+#   roundtrip_check <reference.TMS> [scratch-dir]
+add_executable(roundtrip_check tests/roundtrip_check.cpp tmseditorwindow.cpp updater.cpp)
+target_include_directories(roundtrip_check PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(roundtrip_check PRIVATE APP_VERSION="${TMS_APP_VERSION}")
+target_link_libraries(roundtrip_check PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
