@@ -279,7 +279,8 @@ int main(int argc, char* argv[])
                     code = cells.value(0);
                     name = cells.value(1);
                 }
-                if (window.addRowForCli(opTag, number, code, name, &err))
+                const QString rowPrice = (opTag == QLatin1String("PLU")) ? addPrice : QString();
+                if (window.addRowForCli(opTag, number, code, name, &err, rowPrice))
                     ++successCount;
                 else {
                     ++failures;

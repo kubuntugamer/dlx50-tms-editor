@@ -70,4 +70,11 @@ cp "$WORK/ref.TMS" "$WORK/price.TMS"
 "$E" "$WORK/price.TMS" --list PLU $N | tail -1 | cut -f4 | grep -q '^123,4$' \
   && ok "--add --price: price stored" || bad "--add --price not stored"
 
+# 9b) --add PLU --csv with --price stores the price on each row.
+cp "$WORK/ref.TMS" "$WORK/csvprice.TMS"
+printf 'code,name\n5001,Csv Item\n' > "$WORK/items.csv"
+"$E" "$WORK/csvprice.TMS" --add PLU --csv "$WORK/items.csv" --price 55,5 $N >/dev/null || bad "--add --csv --price exit"
+"$E" "$WORK/csvprice.TMS" --list PLU $N | tail -1 | cut -f4 | grep -q '^55,5$' \
+  && ok "--add --csv --price: price stored" || bad "--add --csv --price not stored"
+
 exit $fail
