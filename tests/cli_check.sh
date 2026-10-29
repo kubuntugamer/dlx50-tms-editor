@@ -212,4 +212,12 @@ if [ -n "${ROUNDTRIP_CHECK:-}" ]; then
   done
 fi
 
+# 13) Issue #12: the Windows self-update helper. It must refuse paths that
+#     cannot be made safe, hand PowerShell its paths through the environment
+#     instead of inlining them, and check every exit code so a failed copy
+#     never relaunches the editor as if the update had succeeded.
+if [ -n "${ROUNDTRIP_CHECK:-}" ]; then
+  "$ROUNDTRIP_CHECK" --update-helper-check || bad "update helper script checks (issue #12)"
+fi
+
 exit $fail

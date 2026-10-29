@@ -19,6 +19,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QSettings>
+#include <QStringList>
 #include <QTemporaryDir>
 #include <QTimer>
 
@@ -554,12 +555,149 @@ void Updater::installLinuxDeb(QWidget* parent, const QString& filePath)
         QCoreApplication::quit();
 }
 
+namespace {
+
+// Issue #12: everything below is pasted into a cmd.exe batch file, so a path
+// has to survive cmd's own parsing. Inside a double-quoted argument cmd takes
+// &, |, <, >, ^, (, ), !, ; and , as plain text, and a % can be neutralised
+// by doubling it — but a double quote would end the argument and a control
+// character would corrupt the script line, so those two are refused outright
+// instead of guessed at.
+bool helperPathIsUsable(const QString& path)
+{
+    if (path.isEmpty())
+        return false;
+    for (const QChar c : path) {
+        if (c == QLatin1Char('"') || c.unicode() < 0x20)
+            return false;
+    }
+    return true;
+}
+
+// Escapes a path for a batch file: a lone % would be read as the start of a
+// variable reference, so it is doubled (batch collapses %% back to %).
+QString cmdEscape(const QString& path)
+{
+    QString escaped = path;
+    escaped.replace(QLatin1String("%"), QLatin1String("%%"));
+    return escaped;
+}
+
+// The same path as one double-quoted cmd.exe argument, which is what keeps
+// the metacharacters literal.
+QString cmdQuote(const QString& path)
+{
+    return QLatin1Char('"') + cmdEscape(path) + QLatin1Char('"');
+}
+
+} // namespace
+
+// Builds the Windows self-update helper (issue #12). Split out of
+// installWindowsZip so the headless test can inspect the script the app
+// would really write. Three rules the script follows:
+//   * cmd gets every path as a double-quoted argument with % doubled;
+//   * PowerShell gets its two paths through environment variables instead of
+//     having them pasted inside its own quoting, so no ' or " can break out;
+//   * every step that can fail (clean, unpack, copy) ends in an errorlevel
+//     check that jumps to a message and exits non-zero — the relaunch only
+//     exists in the success fall-through.
+bool Updater::buildWindowsUpdateHelper(const UpdateHelperPaths& p,
+                                       QString* script, QString* error)
+{
+    const QStringList all{ p.appDir, p.unzipDir, p.persistedZip,
+                           p.updateDir, p.selfExe };
+    for (const QString& value : all) {
+        if (helperPathIsUsable(value))
+            continue;
+        if (error) {
+            *error = tr("The update helper was not written: the path\n"
+                        "  %1\n"
+                        "contains a double quote or a control character, "
+                        "which cannot be passed safely to a batch script.\n\n"
+                        "Move the editor to a folder without those "
+                        "characters and update again.").arg(value);
+        }
+        return false;
+    }
+
+    // No trailing backslash on the copy target: "C:\dir\" would hand xcopy
+    // an escaped quote instead of a closing one. /I tells xcopy the target is
+    // a directory, so it does not prompt for it.
+    const QString zipEnv   = cmdEscape(p.persistedZip);
+    const QString unzipEnv = cmdEscape(p.unzipDir);
+    const QString srcGlob  = cmdQuote(p.unzipDir + QStringLiteral("/tms_editor")
+                                      + QStringLiteral("\\*"));
+    const QString appDir   = cmdQuote(p.appDir);
+    const QString unzipDir = cmdQuote(p.unzipDir);
+    const QString updateDir = cmdQuote(p.updateDir);
+    const QString zip      = cmdQuote(p.persistedZip);
+    const QString self     = cmdQuote(p.selfExe);
+
+    QString s;
+    s += QStringLiteral("@echo off\r\n");
+    s += QStringLiteral("rem dlx50 self-update helper (auto-deleted)\r\n");
+    s += QStringLiteral("rem Paths ride in environment variables and quoted\r\n");
+    s += QStringLiteral("rem arguments only, never inlined (issue #12).\r\n");
+    s += QStringLiteral("timeout /t 2 /nobreak >nul\r\n");
+    s += QStringLiteral("setlocal\r\n");
+    s += QStringLiteral("set \"TMS_UPDATE_ZIP=%1\"\r\n").arg(zipEnv);
+    s += QStringLiteral("set \"TMS_UPDATE_UNZIP=%1\"\r\n").arg(unzipEnv);
+    s += QStringLiteral("\r\n");
+    s += QStringLiteral("if exist %1 (\r\n").arg(unzipDir);
+    s += QStringLiteral("    rmdir /s /q %1\r\n").arg(unzipDir);
+    s += QStringLiteral("    if errorlevel 1 goto :fail_clean\r\n");
+    s += QStringLiteral(")\r\n");
+    s += QStringLiteral(
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command "
+        "\"Expand-Archive -Force -LiteralPath $env:TMS_UPDATE_ZIP "
+        "-DestinationPath $env:TMS_UPDATE_UNZIP\"\r\n");
+    s += QStringLiteral("if errorlevel 1 goto :fail_unpack\r\n");
+    s += QStringLiteral("xcopy %1 %2 /E /Y /I /Q /R /H\r\n")
+             .arg(srcGlob, appDir);
+    s += QStringLiteral("if errorlevel 1 goto :fail_copy\r\n");
+    s += QStringLiteral("rmdir /s /q %1\r\n").arg(updateDir);
+    s += QStringLiteral(
+        "if errorlevel 1 echo NOTE: staging folder left behind: %1\r\n")
+        .arg(updateDir);
+    s += QStringLiteral("start \"\" %1\r\n").arg(self);
+    s += QStringLiteral("exit /b 0\r\n");
+    s += QStringLiteral("\r\n");
+    s += QStringLiteral(":fail_clean\r\n");
+    s += QStringLiteral(
+        "echo The update was NOT installed: the staging folder could not be cleared.\r\n");
+    s += QStringLiteral("echo   %1\r\n").arg(unzipDir);
+    s += QStringLiteral("goto :fail_end\r\n");
+    s += QStringLiteral(":fail_unpack\r\n");
+    s += QStringLiteral(
+        "echo The update was NOT installed: the downloaded archive could not be unpacked.\r\n");
+    s += QStringLiteral("echo   %1\r\n").arg(zip);
+    s += QStringLiteral("goto :fail_end\r\n");
+    s += QStringLiteral(":fail_copy\r\n");
+    s += QStringLiteral("echo The update was NOT installed: copying the new files into\r\n");
+    s += QStringLiteral("echo   %1\r\n").arg(appDir);
+    s += QStringLiteral(
+        "echo failed. The editor was NOT restarted and the installed files may be incomplete.\r\n");
+    s += QStringLiteral("goto :fail_end\r\n");
+    s += QStringLiteral(":fail_end\r\n");
+    s += QStringLiteral("echo.\r\n");
+    s += QStringLiteral("echo Nothing was restarted. The downloaded archive is still at\r\n");
+    s += QStringLiteral("echo   %1\r\n").arg(zip);
+    s += QStringLiteral("echo Press any key to close this window.\r\n");
+    s += QStringLiteral("pause >nul\r\n");
+    s += QStringLiteral("exit /b 1\r\n");
+
+    if (script)
+        *script = s;
+    return true;
+}
+
 // ---------------------------------------------------------------------
 // Windows: the running exe locks tms_editor.exe, so the folder cannot be
 // overwritten while we are running. Stage a small helper .bat next to the
 // exe that (1) waits for this process to exit, (2) unpacks the zip over the
 // folder, (3) starts the updated exe — then quit the running app cleanly so
-// the file lock is released.
+// the file lock is released. The script itself comes from
+// buildWindowsUpdateHelper (issue #12).
 // ---------------------------------------------------------------------
 void Updater::installWindowsZip(QWidget* parent, const QString& filePath)
 {
@@ -586,22 +724,24 @@ void Updater::installWindowsZip(QWidget* parent, const QString& filePath)
         return;
     }
 
-    // Paths are inlined in plain text instead of using cmd %VARS%, and any
-    // quoting stays inside Explore-Archive's single quotes.
+    Updater::UpdateHelperPaths helperPaths;
+    helperPaths.appDir       = appDir;
+    helperPaths.unzipDir     = unzipDir;
+    helperPaths.persistedZip = persistedZip;
+    helperPaths.updateDir    = updateDir;
+    helperPaths.selfExe      = self;
+
     QString bat;
-    bat += QStringLiteral("@echo off\r\n");
-    bat += QStringLiteral("rem dlx50 self-update helper (auto-deleted)\r\n");
-    bat += QStringLiteral("timeout /t 2 /nobreak >nul\r\n");
-    bat += QStringLiteral("if exist \"%1\" rmdir /s /q \"%1\"\r\n").arg(unzipDir);
-    bat += QStringLiteral("powershell -NoProfile -ExecutionPolicy Bypass "
-                          "-Command \"Expand-Archive -Force -LiteralPath '%1' "
-                          "-DestinationPath '%2'\"\r\n").arg(persistedZip, unzipDir);
-    // The release zip's top-level folder is tms_editor/: copy every file and
-    // subfolder (DLLs, plugins/…) over the running folder.
-    bat += QStringLiteral("xcopy \"%1\\*\" \"%2\\\" /E /Y /I /Q /R /H\r\n")
-               .arg(unzipDir + QStringLiteral("/tms_editor"), appDir);
-    bat += QStringLiteral("rmdir /s /q \"%1\"\r\n").arg(updateDir);
-    bat += QStringLiteral("start \"\" \"%1\"\r\n").arg(self);
+    QString buildError;
+    if (!buildWindowsUpdateHelper(helperPaths, &bat, &buildError)) {
+        // Refused rather than guessed at: an unquoted install path is not
+        // worth running arbitrary cmd.exe lines over. Nothing was launched,
+        // so the editor keeps running and the staged zip is cleaned up by
+        // the next attempt.
+        if (parent)
+            QMessageBox::warning(parent, tr("Update failed"), buildError);
+        return;
+    }
 
     const QString batPath = updateDir + QStringLiteral("/tms_editor_update.bat");
     {

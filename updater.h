@@ -51,6 +51,24 @@ public:
                                    const QString& assetName,
                                    QString* sha256Out);
 
+    // Windows self-update helper (issue #12): the .bat that unpacks a
+    // release zip over the running folder once this process has exited.
+    // Pure and public so tests/cli_check.sh can inspect the exact script the
+    // app would write (roundtrip_check --update-helper-check) instead of
+    // having to run an update on Windows.
+    struct UpdateHelperPaths {
+        QString appDir;        // install folder, destination of the copy
+        QString unzipDir;      // extraction folder (<updateDir>/new)
+        QString persistedZip;  // staged release zip, survives our exit
+        QString updateDir;     // the helper's own folder (<appDir>/_update)
+        QString selfExe;       // relaunched only after a clean copy
+    };
+    // Fills *script with the batch file text. Returns false and sets *error
+    // (naming the offending path) when a path cannot be made safe inside a
+    // batch file; *script is then left untouched.
+    static bool buildWindowsUpdateHelper(const UpdateHelperPaths& paths,
+                                         QString* script, QString* error);
+
     // The Releases feed queried; TMS_UPDATE_API_URL overrides it for tests.
     static QUrl releaseApiUrl();
 
