@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end check of the headless CLI on scratch copies of reference files.
 # Usage: tests/cli_check.sh <tms_editor binary> [reference.TMS]
+#        ROUNDTRIP_CHECK=<roundtrip_check binary> adds the byte-exact
+#        open->save round-trip on every fixture (CI sets it).
 #
 # Without a reference the script generates a synthetic layout-A .TMS itself,
 # so it runs on any machine (no scale file needed).  Either way it also
@@ -166,5 +168,20 @@ else
 fi
 cmp -s "$WORK/layoutB.TMS" "$WORK/lbcsv.TMS" \
   && ok "layout B: refused csv left the file unchanged" || bad "layout B: refused csv wrote to the file"
+
+# 12) Optional byte-exact round-trip guard: set ROUNDTRIP_CHECK to the
+#     roundtrip_check binary and every fixture above is also verified to
+#     survive open->save byte-for-byte.  CI does this on every push:
+#       ROUNDTRIP_CHECK=./build/roundtrip_check tests/cli_check.sh ./build/tms_editor
+if [ -n "${ROUNDTRIP_CHECK:-}" ]; then
+  for f in ref.TMS layoutB.TMS; do
+    if out="$("$ROUNDTRIP_CHECK" "$WORK/$f" "$WORK/rt-$f" 2>&1)"; then
+      ok "round-trip byte-identical ($f)"
+    else
+      bad "round-trip changed $f"
+      echo "$out"
+    fi
+  done
+fi
 
 exit $fail

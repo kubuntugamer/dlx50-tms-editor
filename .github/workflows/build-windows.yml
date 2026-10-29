@@ -152,6 +152,16 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+      # Headless checks on every push: the byte-exact device-format round-trip
+      # (open->save must be byte-identical) plus the CLI suite. Both are
+      # self-contained — the fixtures are synthetic, so no scale file is
+      # needed on the runner; ROUNDTRIP_CHECK makes cli_check.sh run the
+      # byte-exact check over every fixture it generates.
+      - name: Headless round-trip and CLI checks
+        env:
+          ROUNDTRIP_CHECK: ./build/roundtrip_check
+        run: bash tests/cli_check.sh ./build/tms_editor
+
       - name: Validate .desktop launcher
         run: desktop-file-validate packaging/dlx50-tms-editor.desktop
 
