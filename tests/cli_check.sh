@@ -169,6 +169,34 @@ fi
 cmp -s "$WORK/layoutB.TMS" "$WORK/lbcsv.TMS" \
   && ok "layout B: refused csv left the file unchanged" || bad "layout B: refused csv wrote to the file"
 
+# 11b) Issue #11: a non-integer ROW/COL must be a usage error, not 0.
+#      toInt() without checking turned "abc" into row 0, so --set quietly
+#      edited the first row and --delete-row quietly deleted it.
+cp "$WORK/layoutB.TMS" "$WORK/lbbadrow.TMS"
+if "$E" "$WORK/lbbadrow.TMS" --set PLU abc 1 "Probe" $N > /dev/null 2> "$WORK/err.txt"; then
+  bad "--set with a non-integer row should have failed"
+else
+  ok "--set with a non-integer row refused"
+fi
+cmp -s "$WORK/layoutB.TMS" "$WORK/lbbadrow.TMS" \
+  && ok "refused --set left the file unchanged" || bad "refused --set wrote to the file"
+
+if "$E" "$WORK/lbbadrow.TMS" --set PLU 1 x "Probe" $N > /dev/null 2>&1; then
+  bad "--set with a non-integer column should have failed"
+else
+  ok "--set with a non-integer column refused"
+fi
+cmp -s "$WORK/layoutB.TMS" "$WORK/lbbadrow.TMS" \
+  && ok "refused --set (column) left the file unchanged" || bad "refused --set (column) wrote to the file"
+
+if "$E" "$WORK/lbbadrow.TMS" --delete-row PLU abc $N > /dev/null 2> "$WORK/err.txt"; then
+  bad "--delete-row with a non-integer row should have failed"
+else
+  ok "--delete-row with a non-integer row refused"
+fi
+cmp -s "$WORK/layoutB.TMS" "$WORK/lbbadrow.TMS" \
+  && ok "refused --delete-row left the file unchanged" || bad "refused --delete-row wrote to the file"
+
 # 12) Optional byte-exact round-trip guard: set ROUNDTRIP_CHECK to the
 #     roundtrip_check binary and every fixture above is also verified to
 #     survive open->save byte-for-byte.  CI does this on every push:

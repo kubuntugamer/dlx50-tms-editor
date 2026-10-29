@@ -160,8 +160,14 @@ int main(int argc, char* argv[])
             haveSet = true;
             if (i + 4 < argc) {
                 opTag = argv[i + 1];
-                setRow = QString(argv[i + 2]).toInt();
-                setCol = QString(argv[i + 3]).toInt();
+                bool okRow = false, okCol = false;
+                setRow = QString(argv[i + 2]).toInt(&okRow);
+                setCol = QString(argv[i + 3]).toInt(&okCol);
+                if (!okRow || !okCol) {
+                    QTextStream e(stderr);
+                    e << "error: --set ROW and COL must be integers\n" << Qt::endl;
+                    return 2;
+                }
                 setValue = argv[i + 4];
             }
             i += 4;
@@ -172,7 +178,13 @@ int main(int argc, char* argv[])
             haveDeleteRow = true;
             if (i + 2 < argc) {
                 opTag = argv[i + 1];
-                deleteRow = QString(argv[i + 2]).toInt();
+                bool okRow = false;
+                deleteRow = QString(argv[i + 2]).toInt(&okRow);
+                if (!okRow) {
+                    QTextStream e(stderr);
+                    e << "error: --delete-row ROW must be an integer\n" << Qt::endl;
+                    return 2;
+                }
             }
             i += 2;
             continue;
