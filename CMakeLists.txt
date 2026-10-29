@@ -15,7 +15,6 @@ set(CMAKE_AUTOUIC ON)
 
 # ---- Options ----
 option(BUILD_TESTS "Build tests" ON)
-option(BUILD_SHELL_INTEGRATION "Build shell integration (e.g. sudoers helper)" OFF)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Network)
 
@@ -43,9 +42,3 @@ if(BUILD_TESTS)
     install(TARGETS roundtrip_check DESTINATION bin OPTIONAL)
 endif()
 
-# ---- Packaging helpers (optional) ----
-if(BUILD_SHELL_INTEGRATION AND UNIX AND NOT APPLE)
-    install(FILES packaging/dlx50-tms-editor-sudoers
-            DESTINATION .
-            OPTIONAL)
-endif()
