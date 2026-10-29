@@ -104,6 +104,17 @@ printf 'code,name\n5001,Csv Item\n' > "$WORK/items.csv"
 "$E" "$WORK/csvprice.TMS" --list PLU $N | tail -1 | cut -f4 | grep -q '^55,5$' \
   && ok "--add --csv --price: price stored" || bad "--add --csv --price not stored"
 
+# 9c) A PLU added with no explicit code gets the next free code automatically.
+#     The item code is the first half of the label barcode (2 + code +
+#     total x 1000), so leaving it blank printed labels with no barcode.
+cp "$WORK/ref.TMS" "$WORK/autocode.TMS"
+"$E" "$WORK/autocode.TMS" --add PLU 9 "" "Codeless Item" $N >/dev/null || bad "add without code exit"
+"$E" "$WORK/autocode.TMS" --list PLU $N | tail -1 | cut -f2 | grep -q '^1002$' \
+  && ok "PLU add without a code gets the next free code (1002)" || bad "PLU add without a code left it blank or wrong"
+"$E" "$WORK/autocode.TMS" --delete PLU 1002 $N >/dev/null || bad "autocode: delete exit"
+cmp -s "$WORK/ref.TMS" "$WORK/autocode.TMS" \
+  && ok "autocode: add+delete is byte-identical" || bad "autocode: add+delete changed the file"
+
 # 10) Layout B: the other real-world row shapes (issue #9).  BAR rows have no
 #     blank field after the row index, so the barcode sits at offset+5 — a
 #     fixed offset+6 read the wrong field (blank barcode column) and wrote a

@@ -11,8 +11,9 @@ table:
 
 - **Add row** clones the last row of that section as an editable draft —
   the next free number in the first column, the name preset to
-  `NEW PRODUCT` (PLU) and the product/barcode code cleared so a new
-  product can't inherit the template's code. All hidden fields (the ~60
+  `NEW PRODUCT` (PLU) and the product/barcode code set to the next free
+  code (existing codes are scanned, so every new product gets a unique
+  code — the first half of its label barcode). All hidden fields (the ~60
   price/weight/telemetry values on a PLU row) are preserved so the scale
   still accepts the row. Sections with no rows get a blank first row
   (PLU stays clone-only — its rows need all 60+ fields).

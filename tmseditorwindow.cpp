@@ -603,10 +603,23 @@ void TmsEditorWindow::addRowToSection(const QString& tag)
         } else {
             cloned[nameIdx] = tr("NEW PRODUCT");
         }
-        // Also clear the cloned product/barcode code when the row has one —
-        // leaving it would give the new product the template row's code.
-        if (nameIdx > srcOffset + 1)
-            cloned[srcOffset + 1] = QString();
+        // The product code is the first half of the label barcode (the
+        // firmware prints 2 + code zero-padded to 6 digits + total x 1000),
+        // so a new row must get the NEXT FREE code — not the template row's
+        // code (every clone would collide) and not a blank (the label would
+        // print with no barcode at all).  Max + 1 keeps the sequence
+        // collision-free even when the existing codes have gaps.
+        if (nameIdx > srcOffset + 1) {
+            int maxCode = -1;
+            for (const QStringList& tw : tokenRows) {
+                bool codeOk = false;
+                const int c = tw.value(srcOffset + 1).toInt(&codeOk);
+                if (codeOk && c > maxCode)
+                    maxCode = c;
+            }
+            cloned[srcOffset + 1] = maxCode >= 0 ? QString::number(maxCode + 1)
+                                                 : QString();
+        }
     } else if (tag == "BAR") {
         // The barcode slot differs per file (findBarcodeIdx) — clear the
         // source row's slot on clone so a newly added BAR row starts blank
