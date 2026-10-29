@@ -107,6 +107,15 @@ above, it opens no window.
 - **Ctrl+Shift+S (Save As)** — pick a destination (still backs up if the
   target already exists).
 
+### File format
+
+The on-disk row layout is documented in
+[docs/dlx50-tms-format.md](docs/dlx50-tms-format.md): the two PLU schemas that
+circulate in the wild (and the fact that the wrong one is **silently** ignored
+by the scale), the `799,2`-style price encoding, and how the label barcode is
+derived from the item code. Verified against real hardware — a file built here
+loaded, printed labels, and came back from the scale byte-identical.
+
 ## Get the Windows app (no build tools needed)
 
 1. Open the repo's **Releases** page.
