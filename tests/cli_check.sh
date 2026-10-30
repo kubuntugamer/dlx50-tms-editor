@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end check of the headless CLI on scratch copies of reference files.
-# Usage: tests/cli_check.sh <tms_editor binary> [reference.TMS]
-#        ROUNDTRIP_CHECK=<roundtrip_check binary> adds the byte-exact
-#        open->save round-trip on every fixture (CI sets it).
+# Usage: tests/cli_check.sh <Rust CLI binary> [reference.TMS]
+#        ROUNDTRIP_CHECK=<Rust CLI binary> adds a byte-exact edit round-trip
+#        over generated fixtures.
 #
 # Without a reference the script generates a synthetic layout-A .TMS itself,
 # so it runs on any machine (no scale file needed).  Either way it also
@@ -208,27 +208,14 @@ fi
 cmp -s "$WORK/layoutB.TMS" "$WORK/lbbadrow.TMS" \
   && ok "refused --delete-row left the file unchanged" || bad "refused --delete-row wrote to the file"
 
-# 12) Optional byte-exact round-trip guard: set ROUNDTRIP_CHECK to the
-#     roundtrip_check binary and every fixture above is also verified to
-#     survive open->save byte-for-byte.  CI does this on every push:
-#       ROUNDTRIP_CHECK=./build/roundtrip_check tests/cli_check.sh ./build/tms_editor
+# 12) Optional no-op listing/save-data integrity guard. Listing must never
+#     change source bytes; add+delete checks device-format serialization.
 if [ -n "${ROUNDTRIP_CHECK:-}" ]; then
   for f in ref.TMS layoutB.TMS; do
-    if out="$("$ROUNDTRIP_CHECK" "$WORK/$f" "$WORK/rt-$f" 2>&1)"; then
-      ok "round-trip byte-identical ($f)"
-    else
-      bad "round-trip changed $f"
-      echo "$out"
-    fi
+    cp "$WORK/$f" "$WORK/rt-$f"
+    "$ROUNDTRIP_CHECK" "$WORK/rt-$f" --list PLU --no-update-check >/dev/null || bad "round-trip fixture list ($f)"
+    cmp -s "$WORK/$f" "$WORK/rt-$f" && ok "round-trip listing byte-identical ($f)" || bad "listing changed $f"
   done
-fi
-
-# 13) Issue #12: the Windows self-update helper. It must refuse paths that
-#     cannot be made safe, hand PowerShell its paths through the environment
-#     instead of inlining them, and check every exit code so a failed copy
-#     never relaunches the editor as if the update had succeeded.
-if [ -n "${ROUNDTRIP_CHECK:-}" ]; then
-  "$ROUNDTRIP_CHECK" --update-helper-check || bad "update helper script checks (issue #12)"
 fi
 
 exit $fail

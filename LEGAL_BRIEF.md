@@ -20,7 +20,7 @@ from-scratch provenance.
 
 ## I. Question Presented
 
-Does an independently written Qt 6 desktop application that reads and writes
+Does an independently written cross-platform desktop application that reads and writes
 plain-text `.TMS` data files (the format used by DLX‑50-style retail scales)
 expose its author to liability under U.S. copyright, DMCA anti-circumvention,
 trade secret, trademark, or patent law — where:
@@ -59,11 +59,12 @@ trade secret, trademark, or patent law — where:
    behind credentials long since unavailable. Nothing was decompiled,
    disassembled, debugged, or copied — there was no original program present
    to do any of that to.
-3. **Development method.** The parser, model, and UI were written from
-   scratch in C++17 / Qt 6 solely from the observable structure of the
-   author's own data files and publicly available specification material. No
-   code was translated or adapted. The git history records the incremental,
-   independent evolution of the project.
+3. **Development method.** The original parser, model, and UI were written
+   from scratch in C++17 / Qt 6 solely from the observable structure of the
+   author's own data files and public specifications. The current application
+   is a clean Rust rewrite of that independently documented behavior. No
+   vendor code was translated or adapted. The git history records the
+   project's independent evolution.
 4. **Naming.** The project is titled "TMS / DLX‑50‑style Editor" — vendor and
    model names appear only descriptively, in plain text, with an explicit
    affiliation disclaimer in the README.
@@ -126,9 +127,10 @@ is infringement of nothing, regardless of how the file is laid out.
 
 ### D. No literal copying
 
-The application is original C++/Qt source. It contains no line of vendor
-code, because no vendor code was ever available to it. Direct (literal)
-infringement is therefore impossible; only non-literal theories remain, and
+The application is original source (the current rewrite is Rust). It contains
+no line of vendor code, because no vendor code was ever available to it.
+Direct (literal) infringement is therefore impossible; only non-literal
+theories remain, and
 Sections IV.B–C dispose of them.
 
 ### E. Fair use as an independent fallback (17 U.S.C. §107)

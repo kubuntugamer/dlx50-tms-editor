@@ -1,6 +1,9 @@
 # Build outputs
 build/
 build-*/
+target/
+AppDir/
+*.AppImage
 dist/
 out/
 .qt/
@@ -14,7 +17,7 @@ out/
 *.TMS.BAK
 products_*
 
-# Legacy Python/PyInstaller attempt — superseded by the C++/Qt app.
+# Legacy Python/PyInstaller prototype (superseded by the Rust app).
 tms_editor.py
 tms_editor.spec
 

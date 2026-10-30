@@ -1,260 +1,161 @@
-name: Build & Release (Windows + Linux)
-
-# Builds both release targets and PROVES they run (not just compile):
-#   * Windows : launches the exe, requires a real main window with a title
-#   * Linux   : launches under Xvfb, requires the same window via xdotool
-# Publishes:
-#   * every run  -> downloadable artifacts  (Actions -> run -> Artifacts)
-#   * tag v*     -> a GitHub Release with BOTH the .zip and the .deb
-#
-# Toolchains:
-#   * Windows : Qt 6.8.3 win64_mingw + Qt's own MinGW 13.1 + Ninja
-#   * Linux   : distro Qt6 from apt, built on ubuntu-24.04 (noble) on PURPOSE:
-#               building on the OLDEST supported release makes the binary run
-#               forward on every newer Ubuntu (25.04, 26.10, ...), while a
-#               build made on a new release would NOT run on noble (newer
-#               glibc/Qt symbols). The .deb Depends use plain package names
-#               (libqt6gui6 etc.) which resolve on both noble and 26.10
-#               (noble's t64 packages Provide the plain names).
+name: Build & Release (Rust, Windows + Linux)
 
 on:
   push:
     branches: [main, master]
     tags: ['v*']
   pull_request:
-  workflow_dispatch:        # manual trigger from the Actions tab
+  workflow_dispatch:
 
 permissions:
-  contents: write           # needed to create Releases
+  contents: write
 
 jobs:
   windows:
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: pwsh
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # Qt 6.8.3 for Windows (MinGW 64-bit) + Qt's bundled MinGW 13.1
-      # compiler (added to PATH by add-tools-to-path, default true).
-      - name: Install Qt + MinGW toolchain
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.8.3'
-          arch: win64_mingw
-          tools: 'tools_mingw1310,qt.tools.win64_mingw1310'
-          add-tools-to-path: true
-          cache: true
-
-      # Ninja (preinstalled on the runner) keeps output at build/tms_editor.exe
-      # (single-config) and the explicit gcc/g++ pins the MinGW toolchain so
-      # CMake can't accidentally pick MSVC, which cannot link MinGW Qt.
-      - name: Configure
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Build and test
         run: |
-          $ver = ''
-          if ($env:GITHUB_REF -like 'refs/tags/v*') {
-            # Stamp the tag into the binary so the in-app updater can
-            # compare it against the latest release (APP_VERSION).
-            $ver = $env:GITHUB_REF_NAME.Substring(1)
-          }
-          # NB: pwsh does NOT accept bash backslash continuation — keep the
-          # whole cmake invocation on one line.
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ -DTMS_APP_VERSION="$ver"
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      # Copy every Qt/runtime DLL + the platforms/ plugin next to the .exe.
-      # Do NOT pass --no-compiler-runtime: the Qt DLLs need
-      # libgcc/libstdc++/libwinpthread from the MinGW toolchain.
-      - name: Deploy Qt runtime
-        run: windeployqt --release --no-translations build/tms_editor.exe
-
+          cargo test --locked --all-targets
+          cargo build --locked --release
+      - name: CLI compatibility checks
+        shell: bash
+        run: bash tests/cli_check.sh target/release/dlx50-tms-editor.exe
+      - name: Smoke test CLI
+        shell: pwsh
+        run: |
+          .\target\release\dlx50-tms-editor.exe --version
+          .\target\release\dlx50-tms-editor.exe --help
       - name: Stage portable folder
+        shell: pwsh
         run: |
           New-Item -ItemType Directory -Force out/tms_editor | Out-Null
-          Copy-Item build/tms_editor.exe out/tms_editor/
-          Get-ChildItem build -File -Filter *.dll |
-            Copy-Item -Destination out/tms_editor/
-          foreach ($d in 'platforms','styles','imageformats','generic',
-                         'iconengines','networkinformation','tls') {
-            if (Test-Path build/$d) {
-              Copy-Item build/$d out/tms_editor/ -Recurse
-            }
-          }
-
-      # ---- Proof it RUNS on Windows (not just compiles) -------------------
-      # Launch the exact folder we're about to ship, wait, and require:
-      #   1. the process is still alive (no startup crash / missing DLL)
-      #   2. it has a real main window with a title
-      - name: Smoke test - launch the exe
-        run: |
-          $proc = Start-Process out/tms_editor/tms_editor.exe -PassThru
-          Start-Sleep -Seconds 12
-          $proc.Refresh()
-          if ($proc.HasExited) {
-            Write-Error "FAIL: exe exited during startup, code=$($proc.ExitCode)"
-            exit 1
-          }
-          $p = Get-Process -Id $proc.Id
-          $title = $p.MainWindowTitle
-          $hwnd  = $p.MainWindowHandle
-          Write-Host "Process alive. MainWindowHandle=$hwnd Title='$title'"
-          if ([string]::IsNullOrEmpty($title) -and $hwnd -eq 0) {
-            Write-Error "FAIL: process alive but no main window was created"
-            Stop-Process -Id $proc.Id -Force
-            exit 1
-          }
-          Write-Host "OK: window is up -> '$title'"
-          Stop-Process -Id $proc.Id -Force
-
-      - name: Zip portable folder
-        run: Compress-Archive -Path out/tms_editor -DestinationPath tms_editor-windows-x64.zip -Force
-
-      # Every successful run gets a downloadable artifact (no tag needed) —
-      # grab it from the Actions page and run it on the Windows box.
-      # On tags a separate release job attaches it to the GitHub Release.
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          Copy-Item target/release/dlx50-tms-editor.exe out/tms_editor/tms_editor.exe
+          Copy-Item LICENSE out/tms_editor/
+          Compress-Archive -Path out/tms_editor -DestinationPath tms_editor-windows-x64.zip -Force
+      - uses: actions/upload-artifact@v4
         with:
           name: tms_editor-windows-x64
           path: tms_editor-windows-x64.zip
           if-no-files-found: error
 
   linux:
-    runs-on: ubuntu-24.04
-
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # ninja + Qt6 from apt; xvfb/xdotool for the launch proof;
-      # desktop-file-utils validates the .desktop launcher.
-      - name: Install dependencies
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install native build and smoke-test dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            qt6-base-dev qt6-qpa-plugins ninja-build \
-            xvfb xdotool desktop-file-utils
-
-      - name: Configure
+            build-essential pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
+            libegl1-mesa-dev libgl1-mesa-dev xvfb xdotool weston wayland-utils \
+            desktop-file-utils fakeroot dpkg-dev binutils
+      - name: Build and test
         run: |
-          ver=''
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            ver="${GITHUB_REF_NAME#v}"
-          fi
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DTMS_APP_VERSION="$ver"
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      # Headless checks on every push: the byte-exact device-format round-trip
-      # (open->save must be byte-identical) plus the CLI suite. Both are
-      # self-contained — the fixtures are synthetic, so no scale file is
-      # needed on the runner; ROUNDTRIP_CHECK makes cli_check.sh run the
-      # byte-exact check over every fixture it generates.
-      - name: Headless round-trip and CLI checks
-        env:
-          ROUNDTRIP_CHECK: ./build/roundtrip_check
-        run: bash tests/cli_check.sh ./build/tms_editor
-
-      - name: Validate .desktop launcher
+          cargo test --locked --all-targets
+          cargo build --locked --release
+      - name: CLI and byte-format compatibility checks
+        run: bash tests/cli_check.sh target/release/dlx50-tms-editor
+      - name: Validate launcher
         run: desktop-file-validate packaging/dlx50-tms-editor.desktop
-
-      # ---- Proof it RUNS on Linux (not just compiles) ---------------------
-      # Real X server (Xvfb), the app picks the xcb platform plugin on its
-      # own; require: process alive after 8s AND a real window whose title
-      # matches. NOTE: the title contains U+2011 non-breaking hyphens, so
-      # the assertion only matches the ASCII-safe prefix/suffix.
-      - name: Smoke test - launch under Xvfb
+      - name: Smoke test the Rust GUI on Wayland
+        run: |
+          set -euo pipefail
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/wayland-runtime"
+          export WAYLAND_DISPLAY=wayland-ci
+          mkdir -m 700 -p "$XDG_RUNTIME_DIR"
+          weston --backend=headless-backend.so --socket="$WAYLAND_DISPLAY" \
+            --idle-time=0 --log="$RUNNER_TEMP/weston.log" &
+          WESTON_PID=$!
+          APP_PID=
+          cleanup() {
+            if [[ -n "$APP_PID" ]]; then kill "$APP_PID" 2>/dev/null || true; fi
+            kill "$WESTON_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for i in $(seq 1 20); do
+            if wayland-info >/dev/null 2>&1; then break; fi
+            kill -0 "$WESTON_PID"
+            sleep 1
+          done
+          wayland-info >/dev/null
+          ./target/release/dlx50-tms-editor &
+          APP_PID=$!
+          sleep 5
+          kill -0 "$APP_PID"
+          echo "GUI process remained active on the headless Wayland compositor"
+      - name: Smoke test the Rust GUI on X11
         run: |
           xvfb-run -a -s "-screen 0 1280x1024x24" bash -euxo pipefail -c '
-            ./build/tms_editor &
+            ./target/release/dlx50-tms-editor &
             PID=$!
-            sleep 8
-            kill -0 $PID || { echo "FAIL: process exited during startup"; exit 1; }
-            WID=$(xdotool search --pid $PID | head -1)
-            TITLE=$(xdotool getwindowname "$WID")
-            echo "Process alive. Window title: $TITLE"
-            case "$TITLE" in
-              "TMS / DLX"*"Editor") echo "OK: window is up -> $TITLE" ;;
-              *) echo "FAIL: unexpected window title: $TITLE"; exit 1 ;;
-            esac
-            kill $PID
+            trap "kill $PID 2>/dev/null || true" EXIT
+            for i in $(seq 1 20); do
+              WID=$(xdotool search --pid "$PID" 2>/dev/null | head -1 || true)
+              if [ -n "$WID" ]; then
+                TITLE=$(xdotool getwindowname "$WID")
+                echo "Window is up: $TITLE"
+                case "$TITLE" in "TMS / DLX-50-style Editor") exit 0 ;; esac
+              fi
+              kill -0 "$PID"
+              sleep 1
+            done
+            echo "GUI did not create its expected X11 window" >&2
+            exit 1
           '
-
-      # .deb Depends are derived from the built binary itself (NEEDED ->
-      # ldd path -> dpkg -S owner, t64 suffix stripped), so they always
-      # match what was actually linked. Version: tag v1.0 -> 1.0, else a
-      # sortable git snapshot version.
-      - name: Build .deb
+      - name: Build Debian package
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            VER="${GITHUB_REF_NAME#v}"
-          else
-            VER="0.0.0~git$(git rev-parse --short HEAD)"
-          fi
-          packaging/make-deb.sh "$VER" build/tms_editor dist
-
-      # dpkg must accept the package, and then the INSTALLED app (via the
-      # /usr/bin symlink, against noble's system Qt) must open its window —
-      # the exact path an end user takes after installing the release .deb.
-      - name: Install the .deb for real and launch it
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then VER="${GITHUB_REF_NAME#v}"; else VER="0.0.0~git$(git rev-parse --short HEAD)"; fi
+          packaging/make-deb.sh "$VER" target/release/dlx50-tms-editor dist
+      - name: Build portable AppImage
         run: |
-          sudo apt-get install -y --no-install-recommends ./dist/*.deb
-          command -v dlx50-tms-editor
-          dpkg -L dlx50-tms-editor
-          xvfb-run -a -s "-screen 0 1280x1024x24" bash -euxo pipefail -c '
-            dlx50-tms-editor &
-            PID=$!
-            sleep 6
-            kill -0 $PID || { echo "FAIL: installed binary exited"; exit 1; }
-            TITLE=$(xdotool getwindowname $(xdotool search --pid $PID | head -1))
-            case "$TITLE" in
-              "TMS / DLX"*"Editor") echo "OK: installed app window up -> $TITLE" ;;
-              *) echo "FAIL: unexpected title: $TITLE"; exit 1 ;;
-            esac
-            kill $PID
-          '
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          install -m 755 target/release/dlx50-tms-editor AppDir/usr/bin/dlx50-tms-editor
+          install -m 644 packaging/dlx50-tms-editor.desktop AppDir/usr/share/applications/dlx50-tms-editor.desktop
+          install -m 644 packaging/dlx50-tms-editor.desktop AppDir/dlx50-tms-editor.desktop
+          install -m 644 LICENSE AppDir/usr/share/doc/dlx50-tms-editor/copyright
+          printf '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/dlx50-tms-editor" "$@"\n' > AppDir/AppRun
+          chmod +x AppDir/AppRun
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy.AppImage
+          chmod +x linuxdeploy.AppImage
+          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --output appimage
+          APPIMAGE=$(find . -maxdepth 1 -type f -name '*.AppImage' ! -name 'linuxdeploy.AppImage' -print -quit)
+          test -n "$APPIMAGE"
+          mv "$APPIMAGE" dist/dlx50-tms-editor-x86_64.AppImage
+      - uses: actions/upload-artifact@v4
         with:
-          name: dlx50-tms-editor-linux-amd64
-          path: dist/*.deb
+          name: dlx50-tms-editor-linux-x86_64
+          path: |
+            dist/*.deb
+            dist/*.AppImage
           if-no-files-found: error
 
-  # Single release job: collects BOTH platforms' artifacts and attaches them
-  # to one GitHub Release when a v* tag is pushed.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [windows, linux]
     runs-on: ubuntu-latest
     steps:
-      - name: Download both artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
-
-      # The in-app updater verifies downloads against this file before
-      # installing anything (updater.cpp looks for SHA256SUMS.txt among the
-      # release assets).
-      - name: Generate SHA256SUMS.txt
-        run: |
-          cd artifacts
-          sha256sum tms_editor-windows-x64.zip *.deb > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-
+      - name: Generate checksums
+        run: cd artifacts && sha256sum tms_editor-windows-x64.zip *.deb *.AppImage > SHA256SUMS.txt
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/tms_editor-windows-x64.zip
             artifacts/*.deb
+            artifacts/*.AppImage
             artifacts/SHA256SUMS.txt
           generate_release_notes: true

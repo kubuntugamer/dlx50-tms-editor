@@ -96,9 +96,9 @@ every new PLU added. The semantics of the `B…L…A…` templates are still unk
 
 ## Before loading a file onto a device
 
-1. Round-trip it: open → save must be byte-identical (the `roundtrip_check`
-   test target does exactly this).
-2. Confirm the schema: `tms_editor FILE.TMS --list PLU` should show the name in
+1. Round-trip it: open → save must be byte-identical. The Rust library test
+   suite covers representative device-shaped fixtures with `cargo test --lib`.
+2. Confirm the schema: `dlx50-tms-editor FILE.TMS --list PLU` should show the name in
    the *Product name* column and the price in *Price (as stored)* for every
    row. A name showing up under a code-like column means layout B.
 3. Check no price is `0,0` — the manual says such a PLU is not valid.
