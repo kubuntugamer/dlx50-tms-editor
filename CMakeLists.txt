@@ -40,5 +40,12 @@ if(BUILD_TESTS)
     target_compile_definitions(roundtrip_check PRIVATE APP_VERSION="${TMS_APP_VERSION}")
     target_link_libraries(roundtrip_check PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
     install(TARGETS roundtrip_check DESTINATION bin OPTIONAL)
+
+    # End-to-end check of the network transport against an in-process fake
+    # scale (issues #7 and #8). Usage: network_check <reference.TMS>
+    add_executable(network_check tests/network_check.cpp transport.cpp)
+    target_include_directories(network_check PRIVATE ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(network_check PRIVATE Qt6::Core Qt6::Network)
+    install(TARGETS network_check DESTINATION bin OPTIONAL)
 endif()
 

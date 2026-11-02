@@ -132,6 +132,16 @@ int main(int argc, char* argv[])
     }
 
     const QString copy = QDir(scratchDir).filePath(QFileInfo(reference).fileName());
+    // The copy path is the reference itself when the reference already lives
+    // in the scratch dir — removing it first would delete the reference, so
+    // refuse instead of silently destroying the file being checked.
+    if (QFileInfo(copy).absoluteFilePath() == QFileInfo(reference).absoluteFilePath()) {
+        std::fprintf(stderr,
+                     "reference %s is already inside the scratch dir %s — "
+                     "pick another scratch dir\n",
+                     qPrintable(reference), qPrintable(scratchDir));
+        return 2;
+    }
     QFile::remove(copy);
     if (!QFile::copy(reference, copy)) {
         std::fprintf(stderr, "cannot copy reference to %s\n", qPrintable(copy));

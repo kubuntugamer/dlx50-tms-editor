@@ -11,8 +11,12 @@
 #include <QAbstractSocket>
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QFile>
+#include <QHostAddress>
+#include <QNetworkDatagram>
 #include <QNetworkProxy>
 #include <QTcpSocket>
+#include <QUdpSocket>
 
 #include <cstring>   // memcpy (ProbePayload)
 
@@ -256,43 +260,360 @@ NetworkProbeResult probeScale(const QString& host, int port, int timeoutMs) {
 // transport_network.cpp once the protocols are known.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// DL-series network protocol (issues #7 and #8)
+//
+// Reverse-engineered black-box: the scale's own beacons gave the ports,
+// and the message templates were recovered from the .NET user-string
+// heap of the OEM's management program. Everything on the wire is ASCII,
+// TAB-separated and CRLF-terminated:
+//
+//   request : "UPL\t<SECTION>\t\r\n"      read-only — the scale sends,
+//                                          the PC only receives
+//   response: "\r\nDWL\t<SECTION>\t\r\n"
+//             "<SECTION>\t<fields>\t\r\n"    zero or more data rows
+//             "END\t<SECTION>\t\r\n"
+//
+// The scale keeps the connection open after answering, so the reader
+// stops at the END marker instead of waiting for the peer to close.
+// An unknown section name is answered with an empty DWL/END pair, which
+// is exactly what an empty section looks like in a real export.
+//
+// Discovery is passive, the way the vendor's utility does it: the scale
+// beacons to UDP 33594 roughly every 10 s ("PTR\t\r\n") and to UDP 33584
+// roughly every 60 s ("UDP\t<port>\t<station>\t\r\n"). Listening on both
+// yields the scale's address within one beacon interval; the second
+// beacon also carries its TCP port (Spec166, default 33581).
+// ---------------------------------------------------------------------
+
+namespace DlNetwork {
+
+constexpr int kDefaultPort = 33581;   // Spec166, the scale's server port
+constexpr int kBeaconPort  = 33594;   // destination of the 10 s beacon
+constexpr int kInfoPort    = 33584;   // destination of the 60 s beacon
+constexpr int kDiscoverMs  = 12000;   // must exceed the 10 s beacon gap
+constexpr int kSectionMs   = 30000;   // PLU takes ~6 s; headroom for a slow one
+constexpr int kPollMs      = 250;     // slice used while waiting on two sockets
+
+// The file's own header/footer. The scale exposes no section for it, and
+// Save() only rewrites an existing "END<TAB>ECS" line rather than adding
+// one, so a retrieved file has to carry it itself. 254 is what this
+// device family's exports start with (A_000.TMS and its .prebar both
+// begin "ECS\tVER\t254\t"); the OEM's generic template ships 100.
+constexpr const char* kEcsHeader = "ECS\tVER\t254\t\r\n";
+constexpr const char* kEcsFooter = "\r\nEND\tECS\t\r\n";
+
+// Section order copied from a real device export (see
+// docs/dlx50-tms-format.md): DPT, CLS, PLU, UNT, BAR, LAB, SAL, REP, SCF,
+// SCP, TMS, TMT, TMR, INF, TIM, BMP — exactly the order the editor reads.
+const QStringList& sectionOrder()
+{
+    static const QStringList order = {
+        "DPT", "CLS", "PLU", "UNT", "BAR", "LAB", "SAL",
+        "REP", "SCF", "SCP", "TMS", "TMT", "TMR",
+        "INF", "TIM", "BMP"
+    };
+    return order;
+}
+
+struct Endpoint {
+    QString host;
+    int port = kDefaultPort;
+    bool heardBeacon = false;
+};
+
+// "UDP\t33581\t254\t\r\n" -> 33581. Returns false for anything else.
+bool parseBeacon(const QByteArray& datagram, int* port)
+{
+    if (!datagram.startsWith("UDP\t"))
+        return false;
+    const QList<QByteArray> fields = datagram.split('\t');
+    if (fields.size() < 2)
+        return false;
+    bool ok = false;
+    const int candidate = QString::fromLatin1(fields.at(1).trimmed()).toInt(&ok);
+    if (!ok || candidate <= 0 || candidate > 65535)
+        return false;
+    *port = candidate;
+    return true;
+}
+
+// Wait for a scale beacon and fill in where to connect.
+bool discover(Endpoint* ep, int timeoutMs, QString* err)
+{
+    QUdpSocket ptrSock, infoSock;
+    const auto mode = QUdpSocket::ShareAddress | QUdpSocket::ReuseAddressHint;
+    const bool ptrBound  = ptrSock.bind(QHostAddress::Any, kBeaconPort, mode);
+    const bool infoBound = infoSock.bind(QHostAddress::Any, kInfoPort, mode);
+    if (!ptrBound && !infoBound) {
+        if (err) {
+            *err = QString("cannot listen on UDP %1/%2 for the scale's "
+                           "beacon — both ports are already in use")
+                       .arg(kBeaconPort).arg(kInfoPort);
+        }
+        return false;
+    }
+
+    QElapsedTimer timer;
+    timer.start();
+    while (timer.elapsed() < timeoutMs) {
+        const qint64 remaining = timeoutMs - timer.elapsed();
+        const int slice = static_cast<int>(qMin<qint64>(kPollMs, remaining));
+        for (QUdpSocket* sock : {&ptrSock, &infoSock}) {
+            if (sock->state() != QAbstractSocket::BoundState)
+                continue;
+            if (!sock->waitForReadyRead(slice))
+                continue;
+            while (sock->hasPendingDatagrams()) {
+                const QNetworkDatagram dgram = sock->receiveDatagram();
+                const QHostAddress from = dgram.senderAddress();
+                if (from.isNull())
+                    continue;
+                ep->heardBeacon = true;
+                // Qt reports an IPv4 peer as ::ffff:a.b.c.d — show the
+                // plain dotted form the rest of the app uses.
+                bool isV4 = false;
+                const quint32 v4 = from.toIPv4Address(&isV4);
+                ep->host = isV4 ? QHostAddress(v4).toString() : from.toString();
+                int port = 0;
+                if (parseBeacon(dgram.data(), &port))
+                    ep->port = port;
+                return true;   // any beacon names the scale; the port is
+                               // Spec166's default unless the 60 s beacon
+                               // said otherwise
+            }
+        }
+    }
+
+    if (err) {
+        *err = QString("no scale beacon heard on UDP %1/%2 within %3 ms "
+                       "— is the scale powered and on this network?")
+                   .arg(kBeaconPort).arg(kInfoPort).arg(timeoutMs);
+    }
+    return false;
+}
+
+// One read-only UPL exchange. Fails unless the response is framed exactly
+// as the protocol says, so a truncated or garbled answer is never mistaken
+// for a good one.
+bool fetchSection(const Endpoint& ep, const QString& section,
+                  QByteArray* out, QString* err)
+{
+    const QByteArray tag = section.toLatin1();
+    const QByteArray request    = "UPL\t" + tag + "\t\r\n";
+    const QByteArray startMark  = "\r\nDWL\t" + tag + "\t\r\n";
+    const QByteArray endMark    = "END\t" + tag + "\t\r\n";
+
+    QTcpSocket sock;
+    // A scale is a local device, not an HTTP endpoint — never let a system
+    // proxy setting redirect this somewhere else.
+    sock.setProxy(QNetworkProxy::NoProxy);
+    sock.connectToHost(ep.host, ep.port);
+    if (!sock.waitForConnected(kSectionMs)) {
+        if (err) {
+            *err = QString("could not connect to scale at %1:%2: %3")
+                       .arg(ep.host).arg(ep.port).arg(sock.errorString());
+        }
+        return false;
+    }
+
+    if (sock.write(request) != request.size()
+            || !sock.waitForBytesWritten(kSectionMs)) {
+        if (err)
+            *err = QString("could not send %1 to the scale: %2")
+                       .arg(QString::fromLatin1(request.trimmed()))
+                       .arg(sock.errorString());
+        return false;
+    }
+
+    QByteArray buf;
+    QElapsedTimer timer;
+    timer.start();
+    for (;;) {
+        // Read until the END marker arrives, the peer goes away, or the
+        // deadline passes. Deliberately no short idle cut-off: the scale
+        // pauses between row batches (PLU takes ~6 s end to end), and an
+        // idle timeout there would truncate a perfectly good response.
+        const qint64 remaining = kSectionMs - timer.elapsed();
+        if (remaining <= 0)
+            break;
+        if (sock.waitForReadyRead(static_cast<int>(remaining))
+                || sock.bytesAvailable() > 0) {
+            buf += sock.readAll();
+            if (buf.contains(endMark))
+                break;
+            continue;
+        }
+        if (buf.contains(endMark))
+            break;
+        if (sock.state() == QAbstractSocket::UnconnectedState)
+            break;
+    }
+    buf += sock.readAll();
+    sock.disconnectFromHost();
+
+    if (!buf.startsWith(startMark)) {
+        if (err) {
+            *err = buf.isEmpty()
+                ? QString("the scale sent no data for section %1").arg(section)
+                : QString("section %1 did not start with DWL: %2")
+                      .arg(section,
+                           QString::fromLatin1(buf.left(60)));
+        }
+        return false;
+    }
+    if (!buf.endsWith(endMark)) {
+        if (err) {
+            *err = QString("section %1 was truncated (%2 bytes, no END "
+                           "marker)").arg(section).arg(buf.size());
+        }
+        return false;
+    }
+
+    *out = buf;
+    return true;
+}
+
+} // namespace DlNetwork
+
 class NetworkTransportBackend : public TransportBackend {
 public:
     QString name() const override {
-        return _tr("Network (scale agent TCP)");
+        return _tr("Network (DL-series scale)");
     }
 
     bool isUsable() const override {
-        // Network is always "usable" in the sense that the code path exists;
-        // actual reachability is discovered at connect time.
+        // Reachability is established from the scale's beacon at list time,
+        // so the code path is always present; a scale that is offline shows
+        // up as an Unreachable result rather than a greyed-out entry.
         return true;
     }
 
     TransportResult listFiles(QList<TransportFile>* out) const override {
         TransportResult r;
-        r.status = TransportResult::Status::NotSupported;
-        r.detail = _tr("network file listing not implemented yet — "
-                      "discover the scale's protocol first (#8)");
+        DlNetwork::Endpoint ep;
+        QString err;
+        if (!ensureEndpoint(&ep, &err)) {
+            r.status = TransportResult::Status::Unreachable;
+            r.detail = err;
+            return r;
+        }
+
+        // The network protocol has no file listing — it streams the scale's
+        // live configuration as sections, which assemble into one .TMS.
+        // That single logical file is what we offer here.
+        if (out) {
+            TransportFile f;
+            f.remotePath = QStringLiteral("LIVE");
+            f.localName  = QStringLiteral("SCALE_LIVE.TMS");
+            f.size = 0;      // not known until the sections are fetched
+            out->append(f);
+        }
+        r.status = TransportResult::Status::Ok;
+        r.detail = QString("scale beacon heard from %1 (TCP %2)")
+                       .arg(ep.host).arg(ep.port);
         return r;
     }
 
     TransportResult retrieveFile(const QString& remotePath,
                                  const QString& localPath) const override {
         TransportResult r;
-        r.status = TransportResult::Status::NotSupported;
-        r.detail = _tr("network file retrieval not implemented yet — "
-                      "discover the scale's protocol first (#8)");
+        if (!remotePath.isEmpty() && remotePath != QLatin1String("LIVE")) {
+            r.status = TransportResult::Status::NotSupported;
+            r.detail = QString("the network transport only offers the scale's "
+                               "live configuration (LIVE), not '%1'")
+                           .arg(remotePath);
+            return r;
+        }
+
+        DlNetwork::Endpoint ep;
+        QString err;
+        if (!ensureEndpoint(&ep, &err)) {
+            r.status = TransportResult::Status::Unreachable;
+            r.detail = err;
+            return r;
+        }
+
+        const QStringList sections = DlNetwork::sectionOrder();
+
+        // Assemble the whole file in memory first (tens of KB at most), so
+        // a failure part-way through never leaves a half-written file on
+        // disk. Every section block already begins with the blank line that
+        // separates blocks, and the header/footer supply the rest — the
+        // result has exactly the shape a device export has.
+        QByteArray content(DlNetwork::kEcsHeader);
+        qint64 total = 0;
+        bool first = true;
+        for (const QString& section : sections) {
+            QByteArray block;
+            if (!DlNetwork::fetchSection(ep, section, &block, &err)) {
+                // A failure on the very first section usually means the
+                // cached address went stale (scale rebooted / DHCP moved
+                // it), so drop it and let the next attempt rediscover.
+                if (first)
+                    m_haveEndpoint = false;
+                r.status = TransportResult::Status::ProtocolError;
+                r.detail = err;
+                return r;
+            }
+            content += block;
+            total += block.size();
+            first = false;
+        }
+        content += QByteArray(DlNetwork::kEcsFooter);
+
+        QFile file(localPath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            r.status = TransportResult::Status::IoError;
+            r.detail = QString("cannot write %1: %2")
+                           .arg(localPath, file.errorString());
+            return r;
+        }
+        if (file.write(content) != content.size()) {
+            const QString why = file.errorString();
+            file.close();
+            QFile::remove(localPath);
+            r.status = TransportResult::Status::IoError;
+            r.detail = QString("short write while saving %1: %2")
+                           .arg(localPath, why);
+            return r;
+        }
+        file.close();
+
+        r.status = TransportResult::Status::Ok;
+        r.detail = QString("retrieved %1 sections (%2 bytes) from %3")
+                       .arg(sections.size()).arg(total).arg(ep.host);
         return r;
     }
 
-    TransportResult uploadFile(const QString& localPath,
-                               const QString& remotePath) const override {
+    TransportResult uploadFile(const QString&,
+                               const QString&) const override {
         TransportResult r;
         r.status = TransportResult::Status::NotSupported;
-        r.detail = _tr("network file upload not implemented yet — "
-                      "discover the scale's protocol first (#8)");
+        r.detail = _tr("writing to the scale is not implemented — only the "
+                      "read-only UPL direction has been reverse-engineered, "
+                      "and an unverified write could corrupt the scale's "
+                      "live data (#7)");
         return r;
     }
+
+private:
+    bool ensureEndpoint(DlNetwork::Endpoint* ep, QString* err) const {
+        if (m_haveEndpoint) {
+            *ep = m_endpoint;
+            return true;
+        }
+        if (!DlNetwork::discover(&m_endpoint, DlNetwork::kDiscoverMs, err))
+            return false;
+        m_haveEndpoint = true;
+        *ep = m_endpoint;
+        return true;
+    }
+
+    // Cached so listFiles() and retrieveFile() do not each pay the up-to
+    // 10 s wait for the next beacon.
+    mutable DlNetwork::Endpoint m_endpoint;
+    mutable bool m_haveEndpoint = false;
 };
 
 // Stubs for USB and serial so the registry can list them. Real ones go in
