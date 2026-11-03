@@ -372,8 +372,8 @@ fn preview_reports_differences_and_writes_nothing() {
     let state = |tag: &str| {
         changes
             .iter()
-            .find(|(section, _)| *section == tag)
-            .map(|(_, s)| *s)
+            .find(|c| c.section == tag)
+            .map(|c| c.state)
     };
     assert_eq!(
         state("PLU"),
@@ -387,6 +387,32 @@ fn preview_reports_differences_and_writes_nothing() {
         matches!(state("DPT"), Some(SectionPreview::WouldClear { .. })),
         "a section absent from the file would be cleared, got {:?}",
         state("DPT")
+    );
+
+    // The detail has to name the row and show both sides of the change, not
+    // just report that the section differs.
+    let plu = changes
+        .iter()
+        .find(|c| c.section == "PLU")
+        .expect("PLU diff");
+    assert_eq!(plu.rows.len(), 1, "one row changed: {:?}", plu.rows);
+    // Field 1 is the PLU number (field 2 is the item code), so that is the id.
+    assert_eq!(plu.rows[0].id, "1");
+    assert!(
+        plu.rows[0]
+            .local
+            .as_deref()
+            .is_some_and(|l| l.contains("199,2")),
+        "the file's price should be shown: {:?}",
+        plu.rows[0].local
+    );
+    assert!(
+        plu.rows[0]
+            .remote
+            .as_deref()
+            .is_some_and(|r| r.contains("100,2")),
+        "the scale's price should be shown: {:?}",
+        plu.rows[0].remote
     );
 
     // The point of the mode: the scale still holds the seeded price and the

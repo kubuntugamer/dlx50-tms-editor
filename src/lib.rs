@@ -1086,7 +1086,7 @@ impl ScaleTransport {
         &mut self,
         local_path: &Path,
         remote_path: &str,
-    ) -> TransportResult<Vec<(&'static str, SectionPreview)>> {
+    ) -> TransportResult<Vec<SectionDiff>> {
         if !remote_path.is_empty() && remote_path != "LIVE" {
             return Err(TransportError::NotSupported(format!(
                 "the network transport only offers the scale's live configuration (LIVE), not '{remote_path}'"
@@ -1117,7 +1117,17 @@ impl ScaleTransport {
                     remote_rows: count_row_lines(&remote_rows),
                 }
             };
-            out.push((section, state));
+            let (rows, more_rows) = if state == SectionPreview::Unchanged {
+                (Vec::new(), 0)
+            } else {
+                diff_rows(&local_rows, &remote_rows)
+            };
+            out.push(SectionDiff {
+                section,
+                state,
+                rows,
+                more_rows,
+            });
         }
         Ok(out)
     }
@@ -1134,11 +1144,100 @@ pub enum SectionPreview {
     WouldClear { remote_rows: usize },
 }
 
+/// How many differing rows each section reports before summarising the rest.
+const MAX_ROW_DIFFS: usize = 5;
+
+/// One section's verdict plus the first few rows behind it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SectionDiff {
+    pub section: &'static str,
+    pub state: SectionPreview,
+    /// The first [`MAX_ROW_DIFFS`] differing rows, so a whole-section replace
+    /// still shows what actually changed.
+    pub rows: Vec<RowDiff>,
+    /// Differences left over beyond the ones in `rows`.
+    pub more_rows: usize,
+}
+
+/// A single row that differs between the file and the scale.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowDiff {
+    /// The row's id field (its second tab field, e.g. the PLU number).
+    pub id: String,
+    /// The row as the file has it; `None` when only the scale has it.
+    pub local: Option<String>,
+    /// The row as the scale has it; `None` when only the file has it.
+    pub remote: Option<String>,
+}
+
 /// Rows in a section's raw bytes, for reporting.
 fn count_row_lines(rows: &[u8]) -> usize {
     rows.split(|b| *b == b'\n')
         .filter(|line| !line.is_empty())
         .count()
+}
+
+/// A section's rows as text lines, without the trailing `\r` and blank tail.
+fn row_lines(rows: &[u8]) -> Vec<String> {
+    rows.split(|b| *b == b'\n')
+        .map(|line| {
+            String::from_utf8_lossy(line)
+                .trim_end_matches('\r')
+                .to_string()
+        })
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+/// Match rows on their id field, which is what a push adds, changes or deletes.
+fn row_key(line: &str) -> String {
+    line.split('\t').nth(1).unwrap_or(line).to_string()
+}
+
+/// Rows present on one side only, or present on both with different content.
+fn diff_rows(local: &[u8], remote: &[u8]) -> (Vec<RowDiff>, usize) {
+    let local_rows = row_lines(local);
+    let remote_rows = row_lines(remote);
+    let remote_index: std::collections::HashMap<String, usize> = remote_rows
+        .iter()
+        .enumerate()
+        .map(|(i, line)| (row_key(line), i))
+        .collect();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut diffs = Vec::new();
+    for line in &local_rows {
+        let key = row_key(line);
+        seen.insert(key.clone());
+        match remote_index.get(&key) {
+            Some(&i) if remote_rows[i] == *line => {}
+            Some(&i) => diffs.push(RowDiff {
+                id: key,
+                local: Some(line.clone()),
+                remote: Some(remote_rows[i].clone()),
+            }),
+            None => diffs.push(RowDiff {
+                id: key,
+                local: Some(line.clone()),
+                remote: None,
+            }),
+        }
+    }
+    for line in &remote_rows {
+        let key = row_key(line);
+        if !seen.contains(&key) {
+            diffs.push(RowDiff {
+                id: key,
+                local: None,
+                remote: Some(line.clone()),
+            });
+        }
+    }
+
+    let total = diffs.len();
+    diffs.truncate(MAX_ROW_DIFFS);
+    let more_rows = total - diffs.len();
+    (diffs, more_rows)
 }
 
 #[derive(Debug, Default)]

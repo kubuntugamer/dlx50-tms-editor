@@ -366,8 +366,8 @@ fn do_scale_preview(local_path: &PathBuf) -> i32 {
     match transport.preview(local_path, "LIVE") {
         Ok(changes) => {
             let mut differing = 0;
-            for (section, state) in &changes {
-                match state {
+            for change in &changes {
+                match change.state {
                     SectionPreview::Unchanged => {}
                     SectionPreview::WouldReplace {
                         local_rows,
@@ -375,15 +375,43 @@ fn do_scale_preview(local_path: &PathBuf) -> i32 {
                     } => {
                         differing += 1;
                         println!(
-                            "  {section}: would replace {remote_rows} row(s) on the scale with {local_rows} from the file"
+                            "  {}: would replace {remote_rows} row(s) on the scale with {local_rows} from the file",
+                            change.section
                         );
                     }
                     SectionPreview::WouldClear { remote_rows } => {
                         differing += 1;
                         println!(
-                            "  {section}: would CLEAR {remote_rows} row(s) on the scale (the file has no {section} rows)"
+                            "  {}: would CLEAR {remote_rows} row(s) on the scale (the file has no {} rows)",
+                            change.section, change.section
                         );
                     }
+                }
+                for row in &change.rows {
+                    match (&row.local, &row.remote) {
+                        (Some(local), Some(remote)) => {
+                            let fields = field_changes(remote, local);
+                            if fields.is_empty() {
+                                println!("      ~ {}: rows differ in shape", row.id);
+                            } else {
+                                println!("      ~ {}: {}", row.id, fields.join(", "));
+                            }
+                        }
+                        (Some(local), None) => println!(
+                            "      + {}: only in the file ({}) — a push would add it",
+                            row.id,
+                            brief(local)
+                        ),
+                        (None, Some(remote)) => println!(
+                            "      - {}: only on the scale ({}) — a push would delete it",
+                            row.id,
+                            brief(remote)
+                        ),
+                        (None, None) => {}
+                    }
+                }
+                if change.more_rows > 0 {
+                    println!("      ... and {} more differing row(s)", change.more_rows);
                 }
             }
             if differing == 0 {
@@ -400,6 +428,43 @@ fn do_scale_preview(local_path: &PathBuf) -> i32 {
             3
         }
     }
+}
+/// At most this many field changes are shown for a single row.
+const MAX_FIELD_CHANGES: usize = 4;
+
+/// Values longer than this are abbreviated, so a 65-field row stays readable.
+const BRIEF_LEN: usize = 48;
+
+/// A quoted, abbreviated field value.
+fn brief(value: &str) -> String {
+    if value.chars().count() > BRIEF_LEN {
+        let cut: String = value.chars().take(BRIEF_LEN).collect();
+        format!("\"{cut}…\"")
+    } else {
+        format!("\"{value}\"")
+    }
+}
+
+/// The fields that differ between the scale's row and the file's, described as
+/// `field <n>: "<scale>" -> "<file>"`. Printing whole rows is useless: a PLU row
+/// has 65 fields and only one of them is usually the point.
+fn field_changes(remote: &str, local: &str) -> Vec<String> {
+    let old: Vec<&str> = remote.split('\t').collect();
+    let new: Vec<&str> = local.split('\t').collect();
+    let mut out = Vec::new();
+    for i in 0..old.len().max(new.len()) {
+        let a = old.get(i).copied().unwrap_or("");
+        let b = new.get(i).copied().unwrap_or("");
+        if a != b {
+            out.push(format!("field {i}: {} -> {}", brief(a), brief(b)));
+        }
+    }
+    if out.len() > MAX_FIELD_CHANGES {
+        let extra = out.len() - MAX_FIELD_CHANGES;
+        out.truncate(MAX_FIELD_CHANGES);
+        out.push(format!("and {extra} more field(s)"));
+    }
+    out
 }
 fn do_scale_live(out_path: &PathBuf) -> i32 {
     let mut transport = ScaleTransport::new();

@@ -173,7 +173,10 @@ Discovery and file assembly both live in the Rust `ScaleTransport` in
 `--scale-upload FILE.TMS --dry-run` runs the same section-by-section
 comparison the upload verifies against *after* writing, and reports it instead
 of writing: each section comes back as unchanged, would be replaced (with row
-counts), or would be cleared because the file carries no rows for it.
+counts), or would be cleared because the file carries no rows for it. For a
+changed section it names the first five differing rows by id and shows which
+fields differ (`field 5: "100,2" -> "349,2"`), so a price typo is visible
+before it reaches the scale.
 
 ## The `TMS` section is the Spec table
 
