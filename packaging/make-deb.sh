@@ -28,12 +28,18 @@ install -m 755 "$BIN" "$ROOT/opt/$PKG/tms_editor"
 ln -s "/opt/$PKG/tms_editor" "$ROOT/usr/bin/$PKG"
 install -m 644 packaging/dlx50-tms-editor.desktop "$ROOT/usr/share/applications/$PKG.desktop"
 install -m 644 LICENSE "$ROOT/usr/share/doc/$PKG/copyright"
-cat > "$ROOT/DEBIAN/control" <<EOF
+{
+cat <<EOF
 Package: $PKG
 Version: $VERSION
 Architecture: $ARCH
 Maintainer: dlx50-tms-editor maintainers <noreply@github.com>
-$(if [ -n "$depends" ]; then printf 'Depends: %s\n' "$depends"; fi)Section: utils
+EOF
+# Written separately: a command substitution strips its trailing newline, which
+# used to glue Depends onto the Section line and made dpkg-deb reject the build.
+if [ -n "$depends" ]; then printf 'Depends: %s\n' "$depends"; fi
+cat <<EOF
+Section: utils
 Priority: optional
 Homepage: https://github.com/kubuntugamer/dlx50-tms-editor
 Installed-Size: $(du -sk "$ROOT/opt" | cut -f1)
@@ -41,6 +47,7 @@ Description: Rust TMS / DLX-50-style editor for DETECTO scale files
  Cross-platform Rust desktop editor for DETECTO scale .TMS data files.
  Independent clean-room implementation; not affiliated with Detecto.
 EOF
+} > "$ROOT/DEBIAN/control"
 mkdir -p "$OUTDIR"
 OUT="$OUTDIR/${PKG}_${VERSION}_${ARCH}.deb"
 fakeroot dpkg-deb -b -Zxz "$ROOT" "$OUT"
