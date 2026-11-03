@@ -169,3 +169,60 @@ device clock.
 
 Discovery and file assembly both live in the Rust `ScaleTransport` in
 `src/lib.rs` (`discover`, `fetch_section`, `retrieve`).
+
+`--scale-upload FILE.TMS --dry-run` runs the same section-by-section
+comparison the upload verifies against *after* writing, and reports it instead
+of writing: each section comes back as unchanged, would be replaced (with row
+counts), or would be cleared because the file carries no rows for it.
+
+## The `TMS` section is the Spec table
+
+`TMS` rows are `TMS<TAB><spec><TAB><value>` where the number is the scale's
+`Spec` number, 0–499 (`UPL <TAB>TMS` answers with 500 rows on the store's
+DL-series). The mapping is documented in the Digi SM-100 service manual §6.4.1
+and the SM-110 Spec table, which agree with each other and with this project's
+existing `Spec166` name for the TCP port.
+
+| Spec | Meaning | Values | The store's scale |
+|---|---|---|---|
+| 48 | scale number (4-line / RS-232C) | 1–999999 | 10 |
+| 49 | client/server interface | 0 none, 1 Ethernet coax, 2 Ethernet twisted | 1 |
+| 50 | client/server | 0 client, 1 server | 0 |
+| 51 | baud rate, RS-232C | 0=1200 1=2400 2=4800 3=9600 4=19200 5=38400 6=76800 | **1 → 2400** |
+| 52 | data length | 0=7 bits, 1=8 bits | **0 → 7 bits** |
+| 53 | parity | 0 none, 1 odd, 2 even | **2 → even** |
+| 54 | stop bits | 0=1 bit, 1=2 bits | **0 → 1 bit** |
+| 60 | SIO job, RS-232C port | 0 none, 1 FIS 30000 #1, 2 FL-1, 3 Point 'N' Shop, 4 barcode | **1 → FIS 30000 #1** |
+| 166–169 | service TCP ports | | 33581–33584 |
+| 376–379 | beacon ports | | 33591–33594 |
+| 401 | RTS/CTS handshaking | 0 off, 1 on | 0 |
+
+So the store's serial port is configured for **2400 baud, 7 data bits, even
+parity, 1 stop bit**, and it is bound to the `FIS 30000 #1` POS job rather than
+a generic output mode. That is why it answers neither a passive listen nor a
+generic `ENQ`/`W`/`S` demand poll (checked at every baud/parity combination,
+plus every 7-bit poll byte at 2400 7E1), and why it never streams.
+
+The RS-232 wiring is straight-through, not null-modem: scale pin 2 is `RXD` and
+pin 3 `TXD`, so they meet the PC's 2/3 the other way round (SM-100 §6.5.2).
+With the cable in the scale's RS-232 socket the adapter should see the scale's
+`DTR` on pins 4 and 7 as `DSR`/`CTS`; seeing neither suggests the cable is in
+the cash-drawer socket instead.
+
+## A live round-trip, measured
+
+Retrieve → push the same file back → retrieve again, against the store's
+scale (Nov 2026):
+
+- 15 of 16 sections came back byte-identical (`PLU` 99 rows, `BAR` 9, `DPT`,
+  `CLS`, `UNT`, `SCP` 148, `TMS` 500, `TMT` 28, `LAB`, `SAL`, `REP`, `SCF`,
+  `TMR`, `BMP`, `INF`).
+- Only `TIM` differed (`16:40:44` → `16:41:56`): the clock runs on, and uploads
+  deliberately never write it.
+- The write reported `every section read back matches what was sent`. That
+  read-back is the only proof available, because the write framing has never
+  been captured from a vendor session.
+
+One caveat seen in practice: the scale drops off the network when it sleeps or
+is powered down (`ping` 100% loss, ARP `INCOMPLETE`), so a retrieve that fails
+to hear a beacon is usually the device being off, not the transport.

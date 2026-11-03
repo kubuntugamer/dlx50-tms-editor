@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use tms_editor::{
     discover, empty_section_block, fetch_section, fetch_section_with_deadline, probe_scale,
-    section_block, Endpoint, ScaleTransport, ECS_FOOTER, ECS_HEADER, NETWORK_SECTIONS,
-    SCALE_BEACON_PORT, SCALE_INFO_PORT,
+    section_block, Endpoint, ScaleTransport, SectionPreview, ECS_FOOTER, ECS_HEADER,
+    NETWORK_SECTIONS, SCALE_BEACON_PORT, SCALE_INFO_PORT,
 };
 
 #[derive(Clone, Copy)]
@@ -333,5 +333,76 @@ fn upload_writes_every_section_and_read_back_matches() {
         empty_section_block("INF")
     );
 
+    stop.store(true, Ordering::SeqCst);
+}
+
+#[test]
+fn preview_reports_differences_and_writes_nothing() {
+    let _ports = lock_discovery_ports();
+    let scale_port = spawn_fake_scale(Mode::Honest);
+    let stop = start_beacon(scale_port);
+
+    // Seed the scale through the real write path, so the state it holds is a
+    // file the scale actually accepted.
+    let seeded_plu: &[u8] = b"PLU\t1\t1001\tWidget\t6\t0\t100,2\t0\t0\t\r\n";
+    let seeded_dpt: &[u8] = b"DPT\t1\tGrocery\t\r\n";
+    let mut seeded = ECS_HEADER.as_bytes().to_vec();
+    seeded.extend_from_slice(&section_block("PLU", seeded_plu));
+    seeded.extend_from_slice(&section_block("DPT", seeded_dpt));
+    seeded.extend_from_slice(ECS_FOOTER.as_bytes());
+    let seeded_path = std::env::temp_dir().join(format!("dlx50_seed_{}.TMS", std::process::id()));
+    std::fs::write(&seeded_path, &seeded).expect("write seeded file");
+
+    let mut transport = ScaleTransport::new();
+    transport
+        .upload(&seeded_path, "LIVE")
+        .expect("seed the fake scale");
+    let ep = transport.endpoint().cloned().expect("discovered endpoint");
+
+    // A candidate that reprices the PLU and carries no other section.
+    let candidate_plu: &[u8] = b"PLU\t1\t1001\tWidget\t6\t0\t199,2\t0\t0\t\r\n";
+    let mut candidate = ECS_HEADER.as_bytes().to_vec();
+    candidate.extend_from_slice(&section_block("PLU", candidate_plu));
+    candidate.extend_from_slice(ECS_FOOTER.as_bytes());
+    let candidate_path =
+        std::env::temp_dir().join(format!("dlx50_cand_{}.TMS", std::process::id()));
+    std::fs::write(&candidate_path, &candidate).expect("write candidate file");
+
+    let changes = transport.preview(&candidate_path, "LIVE").expect("preview");
+    let state = |tag: &str| {
+        changes
+            .iter()
+            .find(|(section, _)| *section == tag)
+            .map(|(_, s)| *s)
+    };
+    assert_eq!(
+        state("PLU"),
+        Some(SectionPreview::WouldReplace {
+            local_rows: 1,
+            remote_rows: 1,
+        }),
+        "a reprice must be reported as a replacement"
+    );
+    assert!(
+        matches!(state("DPT"), Some(SectionPreview::WouldClear { .. })),
+        "a section absent from the file would be cleared, got {:?}",
+        state("DPT")
+    );
+
+    // The point of the mode: the scale still holds the seeded price and the
+    // seeded DPT row, even though the candidate would clear DPT.
+    assert_eq!(
+        fetch_section(&ep, "PLU").expect("read PLU back"),
+        section_block("PLU", seeded_plu),
+        "preview must not write to the scale"
+    );
+    assert_eq!(
+        fetch_section(&ep, "DPT").expect("read DPT back"),
+        section_block("DPT", seeded_dpt),
+        "preview must not clear DPT either"
+    );
+
+    let _ = std::fs::remove_file(&seeded_path);
+    let _ = std::fs::remove_file(&candidate_path);
     stop.store(true, Ordering::SeqCst);
 }

@@ -1077,6 +1077,68 @@ impl ScaleTransport {
         }
         Ok(())
     }
+
+    /// Read every section and report how the local file differs from the scale,
+    /// **without writing anything**. This is the read-only half of `upload`, so a
+    /// push can be previewed with the exact comparison the write would verify
+    /// against afterwards.
+    pub fn preview(
+        &mut self,
+        local_path: &Path,
+        remote_path: &str,
+    ) -> TransportResult<Vec<(&'static str, SectionPreview)>> {
+        if !remote_path.is_empty() && remote_path != "LIVE" {
+            return Err(TransportError::NotSupported(format!(
+                "the network transport only offers the scale's live configuration (LIVE), not '{remote_path}'"
+            )));
+        }
+        let bytes = fs::read(local_path).map_err(|e| {
+            TransportError::Io(format!("cannot read {}: {e}", local_path.display()))
+        })?;
+        let ep = self.ensure_endpoint()?;
+
+        let mut out = Vec::new();
+        for &section in NETWORK_SECTIONS {
+            if VOLATILE_SECTIONS.contains(&section) {
+                continue;
+            }
+            let local_rows = section_rows(&bytes, section);
+            let got = fetch_section(&ep, section).map_err(TransportError::Protocol)?;
+            let remote_rows = section_rows(&got, section);
+            let state = if local_rows == remote_rows {
+                SectionPreview::Unchanged
+            } else if local_rows.is_empty() {
+                SectionPreview::WouldClear {
+                    remote_rows: count_row_lines(&remote_rows),
+                }
+            } else {
+                SectionPreview::WouldReplace {
+                    local_rows: count_row_lines(&local_rows),
+                    remote_rows: count_row_lines(&remote_rows),
+                }
+            };
+            out.push((section, state));
+        }
+        Ok(out)
+    }
+}
+
+/// How one section of a local file compares with what the scale holds now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionPreview {
+    /// The scale already matches; a push would not change this section.
+    Unchanged,
+    /// The file has rows here and the scale holds something else.
+    WouldReplace { local_rows: usize, remote_rows: usize },
+    /// The file has no rows for this section, so a push would empty it.
+    WouldClear { remote_rows: usize },
+}
+
+/// Rows in a section's raw bytes, for reporting.
+fn count_row_lines(rows: &[u8]) -> usize {
+    rows.split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+        .count()
 }
 
 #[derive(Debug, Default)]

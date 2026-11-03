@@ -3,13 +3,13 @@ use std::fs;
 use std::path::PathBuf;
 use tms_editor::{
     discover, fetch_section, probe_scale, split_csv, upload_section, EditError, Editor,
-    ScaleTransport, SCALE_DISCOVER_MS, SECTIONS,
+    ScaleTransport, SectionPreview, SCALE_DISCOVER_MS, SECTIONS,
 };
 
 const VERSION: &str = env!("TMS_APP_VERSION");
 
 fn usage() {
-    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n      bulk add: each line 'CODE,NAME' (header line skipped)\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends a read-only UPL request and reports\n      what the scale answers (no write/delete/reboot/transfer sent)\n  dlx50-tms-editor --scale-live OUT.TMS\n      retrieve the first scale heard over the LAN into OUT.TMS (read-only;\n      exits 3 if no scale beacon is heard or a section fails)\n  dlx50-tms-editor --scale-upload FILE.TMS --allow-write\n      push every section of FILE.TMS to the first scale heard, then read each\n      section back and compare. Writing needs --allow-write; the framing is\n      not vendor-confirmed, so check the read-back result before trusting it\n  dlx50-tms-editor --scale-clock\n      set the scale's clock to this computer's local time (the device RTC\n      drifts on its own, so this is maintenance, not part of a transfer)\n  --version | --no-update-check | --help");
+    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n      bulk add: each line 'CODE,NAME' (header line skipped)\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends a read-only UPL request and reports\n      what the scale answers (no write/delete/reboot/transfer sent)\n  dlx50-tms-editor --scale-live OUT.TMS\n      retrieve the first scale heard over the LAN into OUT.TMS (read-only;\n      exits 3 if no scale beacon is heard or a section fails)\n  dlx50-tms-editor --scale-upload FILE.TMS --allow-write\n      push every section of FILE.TMS to the first scale heard, then read each\n      section back and compare. Writing needs --allow-write; the framing is\n      not vendor-confirmed, so check the read-back result before trusting it\n  dlx50-tms-editor --scale-upload FILE.TMS --dry-run\n      report which sections of FILE.TMS differ from the scale's live\n      configuration -- writes nothing and needs no --allow-write\n  dlx50-tms-editor --scale-clock\n      set the scale's clock to this computer's local time (the device RTC\n      drifts on its own, so this is maintenance, not part of a transfer)\n  --version | --no-update-check | --help");
 }
 #[derive(Default)]
 struct Args {
@@ -27,6 +27,7 @@ struct Args {
     scale_live: Option<PathBuf>,
     scale_upload: Option<PathBuf>,
     allow_write: bool,
+    dry_run: bool,
     set_clock: bool,
     add_values: Vec<String>,
 }
@@ -88,6 +89,7 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
         out.allow_write = args
             .iter()
             .any(|a| a.eq_ignore_ascii_case("--allow-write"));
+        out.dry_run = args.iter().any(|a| a.eq_ignore_ascii_case("--dry-run"));
         return Ok(out);
     }
     if args
@@ -346,6 +348,59 @@ fn do_scale_upload(local_path: &PathBuf) -> i32 {
         }
     }
 }
+/// `--scale-upload FILE.TMS --dry-run`: the same section-by-section comparison
+/// the upload verifies with, reported instead of written.
+fn do_scale_preview(local_path: &PathBuf) -> i32 {
+    let mut transport = ScaleTransport::new();
+    if let Err(e) = transport.list_files() {
+        eprintln!("error: {e}");
+        return 3;
+    }
+    if let Some(ep) = transport.endpoint() {
+        println!("scale endpoint: {}:{}", ep.host, ep.port);
+    }
+    println!(
+        "dry run: comparing {} with the scale — nothing will be written",
+        local_path.display()
+    );
+    match transport.preview(local_path, "LIVE") {
+        Ok(changes) => {
+            let mut differing = 0;
+            for (section, state) in &changes {
+                match state {
+                    SectionPreview::Unchanged => {}
+                    SectionPreview::WouldReplace {
+                        local_rows,
+                        remote_rows,
+                    } => {
+                        differing += 1;
+                        println!(
+                            "  {section}: would replace {remote_rows} row(s) on the scale with {local_rows} from the file"
+                        );
+                    }
+                    SectionPreview::WouldClear { remote_rows } => {
+                        differing += 1;
+                        println!(
+                            "  {section}: would CLEAR {remote_rows} row(s) on the scale (the file has no {section} rows)"
+                        );
+                    }
+                }
+            }
+            if differing == 0 {
+                println!("no differences: the scale already matches this file");
+            } else {
+                println!(
+                    "{differing} section(s) differ; re-run with --allow-write to apply them"
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            3
+        }
+    }
+}
 fn do_scale_live(out_path: &PathBuf) -> i32 {
     let mut transport = ScaleTransport::new();
     let files = match transport.list_files() {
@@ -411,6 +466,9 @@ fn run(args: Vec<String>) -> i32 {
         return do_scale_clock();
     }
     if let Some(local_path) = parsed.scale_upload {
+        if parsed.dry_run {
+            return do_scale_preview(&local_path);
+        }
         if !parsed.allow_write {
             eprintln!(
                 "error: --scale-upload writes to the scale; re-run with --allow-write to confirm"
