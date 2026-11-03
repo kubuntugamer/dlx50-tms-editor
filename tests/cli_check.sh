@@ -144,7 +144,10 @@ cmp -s "$WORK/layoutB.TMS" "$WORK/lb.TMS" && ok "layout B: --list leaves the fil
 "$E" "$WORK/lb.TMS" --add BAR 3 "" "B002L002A000A000A000" $N >/dev/null || bad "layout B: add BAR exit"
 grep -q $'^BAR\t3\t0\t0\t0\t0\tB002L002A000A000A000\t' "$WORK/lb.TMS" \
   && ok "layout B: barcode stored in its own field" || bad "layout B: barcode in the wrong field"
-grep -q $'^BAR\t2\t0\t0\t0\t0\tB001L001A000A000A000\t\r$' "$WORK/lb.TMS" \
+# CR is stripped before matching: Git Bash's grep folds CRLF line endings, so a
+# literal trailing \r can never match on Windows. Byte-exactness (including
+# CRLF) is covered by the add+delete cmp checks below.
+tr -d '\r' < "$WORK/lb.TMS" | grep -q $'^BAR\t2\t0\t0\t0\t0\tB001L001A000A000A000\t$' \
   && ok "layout B: earlier rows keep exactly one barcode" || bad "layout B: an earlier row changed"
 "$E" "$WORK/lb.TMS" --delete-row BAR 2 $N >/dev/null || bad "layout B: delete-row exit"
 cmp -s "$WORK/layoutB.TMS" "$WORK/lb.TMS" \
