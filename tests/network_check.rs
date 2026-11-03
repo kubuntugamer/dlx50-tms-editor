@@ -2,16 +2,18 @@
 //! `qt-network-transport` branch): a local fake scale that speaks the beacon
 //! and the read-only UPL exchange, driven through the real backend code.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use tms_editor::{
-    discover, empty_section_block, fetch_section, probe_scale, Endpoint, ScaleTransport,
-    ECS_FOOTER, ECS_HEADER, NETWORK_SECTIONS, SCALE_BEACON_PORT,
+    discover, empty_section_block, fetch_section, fetch_section_with_deadline, probe_scale,
+    section_block, Endpoint, ScaleTransport, ECS_FOOTER, ECS_HEADER, NETWORK_SECTIONS,
+    SCALE_BEACON_PORT, SCALE_INFO_PORT,
 };
 
 #[derive(Clone, Copy)]
@@ -25,15 +27,32 @@ enum Mode {
     Truncated,
 }
 
-fn serve(mut stream: TcpStream, mode: Mode) {
+/// What the fake scale has been told to store, per section tag.
+type ScaleState = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
+/// A request is complete at its trailing CRLF — except a write, whose rows end
+/// in CRLF too, so it is only complete at the END closer.
+fn is_complete(req: &[u8]) -> bool {
+    if !req.ends_with(b"\r\n") {
+        return false;
+    }
+    if !req.starts_with(b"\r\nDWL\t") {
+        return true;
+    }
+    let text = String::from_utf8_lossy(req);
+    let tag = text.split('\t').nth(1).unwrap_or("");
+    req.ends_with(format!("END\t{tag}\t\r\n").as_bytes())
+}
+
+fn serve(mut stream: TcpStream, mode: Mode, state: ScaleState) {
     let mut req = Vec::new();
-    let mut chunk = [0u8; 512];
+    let mut chunk = [0u8; 4096];
     loop {
         match stream.read(&mut chunk) {
             Ok(0) => return,
             Ok(n) => {
                 req.extend_from_slice(&chunk[..n]);
-                if req.ends_with(b"\r\n") {
+                if is_complete(&req) {
                     break;
                 }
             }
@@ -42,14 +61,30 @@ fn serve(mut stream: TcpStream, mode: Mode) {
     }
     let text = String::from_utf8_lossy(&req);
     let tag = text.split('\t').nth(1).unwrap_or("").to_owned();
+
+    // A write looks exactly like the framing the device itself emits: a DWL
+    // header, the rows, then the END closer.
+    if req.starts_with(b"\r\nDWL\t") {
+        let rows = tms_editor::section_rows(&req, &tag);
+        state.lock().unwrap_or_else(|e| e.into_inner()).insert(tag, rows);
+        return; // no acknowledgement is modelled — the read-back is the proof
+    }
+
     let response = match mode {
         Mode::Garbled => b"GARBAGE\r\n".to_vec(),
         Mode::Truncated => format!("\r\nDWL\t{tag}\t\r\npartial row").into_bytes(),
         Mode::Honest => {
-            if NETWORK_SECTIONS.contains(&tag.as_str()) {
-                format!("\r\nDWL\t{tag}\t\r\n{tag}\t1\tOK\t\r\nEND\t{tag}\t\r\n").into_bytes()
-            } else {
-                empty_section_block(&tag)
+            let stored = state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&tag)
+                .cloned();
+            match stored {
+                Some(rows) => section_block(&tag, &rows),
+                None if NETWORK_SECTIONS.contains(&tag.as_str()) => {
+                    format!("\r\nDWL\t{tag}\t\r\n{tag}\t1\tOK\t\r\nEND\t{tag}\t\r\n").into_bytes()
+                }
+                None => empty_section_block(&tag),
             }
         }
     };
@@ -61,10 +96,11 @@ fn serve(mut stream: TcpStream, mode: Mode) {
 fn spawn_fake_scale(mode: Mode) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind fake scale");
     let port = listener.local_addr().expect("local_addr").port();
+    let state: ScaleState = Arc::new(Mutex::new(HashMap::new()));
     thread::spawn(move || {
         for stream in listener.incoming() {
             match stream {
-                Ok(s) => serve(s, mode),
+                Ok(s) => serve(s, mode, Arc::clone(&state)),
                 Err(_) => break,
             }
         }
@@ -87,8 +123,17 @@ fn start_beacon(tcp_port: u16) -> Arc<AtomicBool> {
     stop
 }
 
+/// Discovery binds two fixed UDP ports, so tests that use it — or that hold
+/// those ports on purpose — must not run concurrently within this binary.
+static DISCOVERY_PORTS: Mutex<()> = Mutex::new(());
+
+fn lock_discovery_ports() -> std::sync::MutexGuard<'static, ()> {
+    DISCOVERY_PORTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[test]
 fn fake_scale_end_to_end() {
+    let _ports = lock_discovery_ports();
     let scale_port = spawn_fake_scale(Mode::Honest);
     let stop = start_beacon(scale_port);
 
@@ -142,13 +187,6 @@ fn fake_scale_end_to_end() {
     }
     std::fs::remove_file(&out).ok();
 
-    // The write direction stays refused.
-    let err = transport.upload(&out, "LIVE").expect_err("upload must fail");
-    assert!(
-        err.to_string().to_lowercase().contains("not implemented"),
-        "{err}"
-    );
-
     stop.store(true, Ordering::SeqCst);
 }
 
@@ -162,4 +200,138 @@ fn probe_sends_a_read_only_upl_request() {
     let joined = r.observations.join("\n");
     assert!(joined.contains("UPL\tINF"), "{joined}");
     assert!(joined.contains("framed DWL"), "{joined}");
+}
+
+#[test]
+fn discover_fails_when_both_beacon_ports_are_taken() {
+    let _ports = lock_discovery_ports();
+    // Hold both discovery ports so the passive listener cannot bind either.
+    let Ok(beacon) = UdpSocket::bind(("0.0.0.0", SCALE_BEACON_PORT)) else {
+        panic!("ports unavailable for test: UDP {SCALE_BEACON_PORT} is already in use");
+    };
+    let Ok(info) = UdpSocket::bind(("0.0.0.0", SCALE_INFO_PORT)) else {
+        panic!("ports unavailable for test: UDP {SCALE_INFO_PORT} is already in use");
+    };
+
+    let err = discover(100).expect_err("discover must fail when neither port can be bound");
+    assert!(
+        err.contains(&SCALE_BEACON_PORT.to_string()) && err.contains(&SCALE_INFO_PORT.to_string()),
+        "the error should name both ports: {err}"
+    );
+
+    drop(beacon);
+    drop(info);
+}
+
+#[test]
+fn fetch_section_times_out_on_a_silent_scale() {
+    // Accept the connection, then say nothing at all; the client must give up
+    // on its own deadline instead of waiting for the peer to close.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind silent scale");
+    let port = listener.local_addr().expect("local_addr").port();
+    thread::spawn(move || {
+        if let Ok((open, _)) = listener.accept() {
+            thread::sleep(Duration::from_secs(10));
+            drop(open);
+        }
+    });
+
+    let ep = Endpoint {
+        host: "127.0.0.1".into(),
+        port,
+        heard_beacon: false,
+    };
+    let started = std::time::Instant::now();
+    let err = fetch_section_with_deadline(&ep, "INF", 200)
+        .expect_err("a silent scale must time out");
+    assert!(err.contains("timed out"), "{err}");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the deadline was not honoured: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn retrieve_writes_header_footer_and_every_network_section() {
+    let _ports = lock_discovery_ports();
+    let scale_port = spawn_fake_scale(Mode::Honest);
+    let stop = start_beacon(scale_port);
+
+    let out = std::env::temp_dir().join(format!(
+        "dlx50_retrieve_shapes_{}.TMS",
+        std::process::id()
+    ));
+    let mut transport = ScaleTransport::new();
+    transport
+        .retrieve("LIVE", &out)
+        .expect("retrieve from the fake scale");
+    stop.store(true, Ordering::SeqCst);
+
+    let text = std::fs::read_to_string(&out).expect("read the assembled file");
+    let _ = std::fs::remove_file(&out);
+
+    assert!(
+        text.starts_with(ECS_HEADER),
+        "the file must start with the ECS header: {text:?}"
+    );
+    assert!(
+        text.ends_with(ECS_FOOTER),
+        "the file must end with the ECS footer: {text:?}"
+    );
+    for &section in NETWORK_SECTIONS {
+        assert_eq!(
+            text.matches(&format!("END\t{section}\t\r\n")).count(),
+            1,
+            "section {section} must have exactly one END closer"
+        );
+    }
+    // One closer per section, plus the file's own "END\tECS\t" footer.
+    assert_eq!(
+        text.matches("\r\nEND\t").count(),
+        NETWORK_SECTIONS.len() + 1,
+        "unexpected number of END markers"
+    );
+}
+
+#[test]
+fn upload_writes_every_section_and_read_back_matches() {
+    let _ports = lock_discovery_ports();
+    let scale_port = spawn_fake_scale(Mode::Honest);
+    let stop = start_beacon(scale_port);
+
+    let plu_rows: &[u8] = b"PLU\t1\t1001\tWidget\t0\t0\t799,2\t0\t0\t\r\n";
+    let dpt_rows: &[u8] = b"DPT\t1\tGrocery\t\r\n";
+    let mut content = ECS_HEADER.as_bytes().to_vec();
+    content.extend_from_slice(&section_block("PLU", plu_rows));
+    content.extend_from_slice(&section_block("DPT", dpt_rows));
+    content.extend_from_slice(ECS_FOOTER.as_bytes());
+
+    let src = std::env::temp_dir().join(format!(
+        "dlx50_upload_src_{}.TMS",
+        std::process::id()
+    ));
+    std::fs::write(&src, &content).expect("write source file");
+
+    let mut transport = ScaleTransport::new();
+    transport.upload(&src, "LIVE").expect("upload to the fake scale");
+    let ep = transport.endpoint().cloned().expect("discovered endpoint");
+    let _ = std::fs::remove_file(&src);
+
+    // The rows the fake stored are what a read returns.
+    assert_eq!(
+        fetch_section(&ep, "PLU").expect("read PLU back"),
+        section_block("PLU", plu_rows)
+    );
+    assert_eq!(
+        fetch_section(&ep, "DPT").expect("read DPT back"),
+        section_block("DPT", dpt_rows)
+    );
+    // A section the file does not carry is written as empty and stays empty.
+    assert_eq!(
+        fetch_section(&ep, "INF").expect("read INF back"),
+        empty_section_block("INF")
+    );
+
+    stop.store(true, Ordering::SeqCst);
 }

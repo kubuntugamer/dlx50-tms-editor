@@ -21,14 +21,17 @@ PLU schemas.
 
 - Open, edit, add and delete rows across section tabs.
 - **Ctrl+S** saves in place after making a `.BAK`; **Ctrl+Shift+S** opens Save As.
-- The read-only scale probe connects to the scale and sends a single
-  `UPL\tINF\t\r\n` section request, then captures the framed `DWL…END`
-  response. It sends no write, delete, reboot, or transfer command, and it
-  needs no USB cable.
-- The network transport (UDP beacon discovery plus per-section fetch) is
-  implemented in the library and covered by tests, but is not yet exposed as
-  a CLI or GUI retrieve/upload command. USB and serial remain unimplemented
-  until the hardware protocol is known.
+- `--scale-live OUT.TMS` retrieves the first scale heard over the LAN into
+  OUT.TMS: UDP beacon discovery, then every section fetched in device order and
+  assembled behind the ECS header and footer.
+- `--scale-upload FILE.TMS --allow-write` writes each section back, then reads
+  every one of them again and compares. The write framing is confirmed against
+  real hardware — a full write followed by a fresh retrieval is byte-identical
+  apart from the clock row — but it was never captured from the OEM program, so
+  the read-back is what proves it. The `TIM` clock section is never written.
+- The read-only probe sends a single `UPL\tINF\t\r\n` and captures the framed
+  `DWL…END` reply. USB and serial remain unimplemented until the hardware
+  protocol is known.
 - Help → Check for Updates checks GitHub Releases. A download is installed
   only after you explicitly confirm, and a published `SHA256SUMS.txt` must
   download and match before installation. Linux installation uses `pkexec`;

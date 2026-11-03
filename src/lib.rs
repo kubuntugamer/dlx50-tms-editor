@@ -587,9 +587,12 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 // empty section is answered with an empty DWL/END pair — exactly what an empty
 // section looks like in a real export.
 //
-// The write direction stays unimplemented: only the read direction has been
-// reverse-engineered, and an unverified write could corrupt the scale's live
-// data (#7).
+// The write direction reuses that same block shape: the PC sends
+// "\r\nDWL\t<SECTION>\t\r\n" + rows + "END\t<SECTION>\t\r\n" and the scale
+// applies it without answering. Verified against a real DL-series (a full write
+// followed by a retrieval is byte-identical apart from the clock row) but never
+// captured from the OEM program, so `upload` re-reads every section instead of
+// trusting the send. The device clock section (TIM) is never written.
 // ---------------------------------------------------------------------------
 
 /// Spec166 default TCP port for the scale's server.
@@ -621,6 +624,43 @@ pub const NETWORK_SECTIONS: &[&str] = &[
     "DPT", "CLS", "PLU", "UNT", "BAR", "LAB", "SAL", "REP", "SCF", "SCP", "TMS", "TMT", "TMR",
     "INF", "TIM", "BMP",
 ];
+
+/// The exact bytes a section occupies in the file: the `DWL` header, the rows,
+/// and the `END` closer. Used both to build a write and to predict what a
+/// read-back should return.
+pub fn section_block(tag: &str, rows: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rows.len() + tag.len() * 2 + 16);
+    out.extend_from_slice(format!("\r\nDWL\t{tag}\t\r\n").as_bytes());
+    out.extend_from_slice(rows);
+    out.extend_from_slice(format!("END\t{tag}\t\r\n").as_bytes());
+    out
+}
+
+/// The row bytes of one section inside a whole `.TMS`, ready to be written
+/// back. A missing section yields no rows — which is what an empty section is.
+pub fn section_rows(file: &[u8], tag: &str) -> Vec<u8> {
+    let start = format!("\r\nDWL\t{tag}\t\r\n");
+    let end = format!("END\t{tag}\t\r\n");
+    let Some(at) = file
+        .windows(start.len())
+        .position(|w| w == start.as_bytes())
+    else {
+        return Vec::new();
+    };
+    let from = at + start.len();
+    let Some(len) = file[from..]
+        .windows(end.len())
+        .position(|w| w == end.as_bytes())
+    else {
+        return Vec::new();
+    };
+    file[from..from + len].to_vec()
+}
+
+/// Sections whose value belongs to the device, not to a saved file. `TIM` is
+/// the scale's running clock (yy mm dd hh mm ss): writing a file's stale copy
+/// back would reset it, so uploads skip it and the read-back ignores it.
+pub const VOLATILE_SECTIONS: &[&str] = &["TIM"];
 
 /// One read-only section request: "UPL\t<TAG>\t\r\n".
 pub fn upl_request(tag: &str) -> Vec<u8> {
@@ -730,6 +770,16 @@ pub fn discover(timeout_ms: u64) -> Result<Endpoint, String> {
 /// or garbled answer is never mistaken for a good one. There is deliberately
 /// no idle timeout inside a section: the scale pauses between row batches.
 pub fn fetch_section(ep: &Endpoint, tag: &str) -> Result<Vec<u8>, String> {
+    fetch_section_with_deadline(ep, tag, SCALE_SECTION_MS)
+}
+
+/// The same exchange with an injectable per-section deadline, so a scale that
+/// accepts and then goes silent can be tested without waiting 30 s.
+pub fn fetch_section_with_deadline(
+    ep: &Endpoint,
+    tag: &str,
+    deadline_ms: u64,
+) -> Result<Vec<u8>, String> {
     let start = format!("\r\nDWL\t{tag}\t\r\n");
     let end = format!("END\t{tag}\t\r\n");
 
@@ -740,13 +790,13 @@ pub fn fetch_section(ep: &Endpoint, tag: &str) -> Result<Vec<u8>, String> {
         .ok_or_else(|| format!("could not resolve scale at {}:{}", ep.host, ep.port))?;
 
     let mut sock =
-        TcpStream::connect_timeout(&addr, Duration::from_millis(SCALE_SECTION_MS)).map_err(|e| {
+        TcpStream::connect_timeout(&addr, Duration::from_millis(deadline_ms)).map_err(|e| {
             format!("could not connect to scale at {}:{}: {e}", ep.host, ep.port)
         })?;
 
     let started = Instant::now();
     let left = || -> Option<Duration> {
-        let ms = SCALE_SECTION_MS.saturating_sub(started.elapsed().as_millis() as u64);
+        let ms = deadline_ms.saturating_sub(started.elapsed().as_millis() as u64);
         (ms > 0).then_some(Duration::from_millis(ms))
     };
 
@@ -762,7 +812,7 @@ pub fn fetch_section(ep: &Endpoint, tag: &str) -> Result<Vec<u8>, String> {
     loop {
         let Some(d) = left() else {
             return Err(format!(
-                "section {tag} timed out after {SCALE_SECTION_MS} ms ({} bytes)",
+                "section {tag} timed out after {deadline_ms} ms ({} bytes)",
                 buf.len()
             ));
         };
@@ -777,15 +827,20 @@ pub fn fetch_section(ep: &Endpoint, tag: &str) -> Result<Vec<u8>, String> {
                     break;
                 }
             }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            // The socket's read timeout is always set to whatever is left of
+            // the section deadline, so this means the deadline expired before
+            // END arrived — report that rather than a missing END marker.
             Err(e)
                 if matches!(
                     e.kind(),
-                    io::ErrorKind::WouldBlock
-                        | io::ErrorKind::TimedOut
-                        | io::ErrorKind::Interrupted
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) =>
             {
-                break;
+                return Err(format!(
+                    "section {tag} timed out after {deadline_ms} ms ({} bytes)",
+                    buf.len()
+                ));
             }
             Err(e) => return Err(format!("read from scale failed for section {tag}: {e}")),
         }
@@ -808,6 +863,66 @@ pub fn fetch_section(ep: &Endpoint, tag: &str) -> Result<Vec<u8>, String> {
         ));
     }
     Ok(buf)
+}
+
+/// Send one section to the scale and return whatever it says back.
+///
+/// The write framing is **not vendor-confirmed**: it mirrors the device's own
+/// `DWL…END` reply, which is the only shape ever observed on the wire. Treat
+/// the reply as diagnostics only — the caller must read the section back to
+/// know whether the scale stored anything.
+pub fn upload_section(ep: &Endpoint, tag: &str, rows: &[u8]) -> Result<Vec<u8>, String> {
+    upload_section_with_deadline(ep, tag, rows, SCALE_SECTION_MS)
+}
+
+/// The same write with an injectable reply window.
+pub fn upload_section_with_deadline(
+    ep: &Endpoint,
+    tag: &str,
+    rows: &[u8],
+    deadline_ms: u64,
+) -> Result<Vec<u8>, String> {
+    let addr = (ep.host.as_str(), ep.port)
+        .to_socket_addrs()
+        .map_err(|e| format!("could not resolve scale at {}:{}: {e}", ep.host, ep.port))?
+        .next()
+        .ok_or_else(|| format!("could not resolve scale at {}:{}", ep.host, ep.port))?;
+
+    let mut sock =
+        TcpStream::connect_timeout(&addr, Duration::from_millis(deadline_ms)).map_err(|e| {
+            format!("could not connect to scale at {}:{}: {e}", ep.host, ep.port)
+        })?;
+    sock.write_all(&section_block(tag, rows))
+        .map_err(|e| format!("could not send {tag} to the scale: {e}"))?;
+    let _ = sock.flush();
+
+    // Collect an acknowledgement if one comes, but never wait long: an
+    // unconfirmed write must look like a quick no-reply, not like a hang.
+    let started = Instant::now();
+    let mut reply = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let left = deadline_ms.saturating_sub(started.elapsed().as_millis() as u64);
+        if left == 0 {
+            break;
+        }
+        if sock
+            .set_read_timeout(Some(Duration::from_millis(left.min(1_000))))
+            .is_err()
+        {
+            break;
+        }
+        match sock.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => reply.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
+                break
+            }
+            Err(e) => return Err(format!("read from scale failed while writing {tag}: {e}")),
+        }
+    }
+    Ok(reply)
 }
 
 /// Why a transport operation could not complete.
@@ -866,6 +981,12 @@ impl ScaleTransport {
         Ok(ep)
     }
 
+    /// Where discovery settled, if it has run yet — the CLI prints this so a
+    /// failed fetch is diagnosable.
+    pub fn endpoint(&self) -> Option<&Endpoint> {
+        self.endpoint.as_ref()
+    }
+
     /// Offer the scale's live configuration as the single logical file.
     pub fn list_files(&mut self) -> TransportResult<Vec<TransportFile>> {
         self.ensure_endpoint()?;
@@ -911,14 +1032,50 @@ impl ScaleTransport {
         Ok(())
     }
 
-    /// The write direction is deliberately refused: only the read direction
-    /// has been reverse-engineered, and an unverified write could corrupt the
-    /// scale's live data (#7).
-    pub fn upload(&self, _local_path: &Path, _remote_path: &str) -> TransportResult<()> {
-        Err(TransportError::NotSupported(
-            "writing to the scale is not implemented — only the read-only UPL direction has been reverse-engineered, and an unverified write could corrupt the scale's live data (#7)"
-                .into(),
-        ))
+    /// Push a local `.TMS` back to the scale, one section at a time in device
+    /// order, then read every section back and compare it with what was sent.
+    ///
+    /// The write framing mirrors the device's own `DWL…END` replies; it was
+    /// never captured from a vendor write session, so the read-back is the only
+    /// proof the scale took the data. A mismatch is reported, never retried —
+    /// a half-applied write is the worst moment to guess again.
+    pub fn upload(&mut self, local_path: &Path, remote_path: &str) -> TransportResult<()> {
+        if !remote_path.is_empty() && remote_path != "LIVE" {
+            return Err(TransportError::NotSupported(format!(
+                "the network transport only offers the scale's live configuration (LIVE), not '{remote_path}'"
+            )));
+        }
+        let bytes = fs::read(local_path).map_err(|e| {
+            TransportError::Io(format!("cannot read {}: {e}", local_path.display()))
+        })?;
+        let ep = self.ensure_endpoint()?;
+
+        for &section in NETWORK_SECTIONS {
+            if VOLATILE_SECTIONS.contains(&section) {
+                continue;
+            }
+            let rows = section_rows(&bytes, section);
+            upload_section(&ep, section, &rows).map_err(TransportError::Protocol)?;
+        }
+
+        let mut mismatched = Vec::new();
+        for &section in NETWORK_SECTIONS {
+            if VOLATILE_SECTIONS.contains(&section) {
+                continue;
+            }
+            let expected = section_block(section, &section_rows(&bytes, section));
+            let got = fetch_section(&ep, section).map_err(TransportError::Protocol)?;
+            if got != expected {
+                mismatched.push(section);
+            }
+        }
+        if !mismatched.is_empty() {
+            return Err(TransportError::Protocol(format!(
+                "the scale did not store what was sent for {} — the write framing has never been confirmed against a vendor session, so stop and compare by hand before sending anything else",
+                mismatched.join(", ")
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -1106,5 +1263,50 @@ mod tests {
             .unwrap(),
             "a".repeat(64)
         );
+    }
+    #[test]
+    fn upl_request_wraps_a_three_letter_tag_verbatim() {
+        assert_eq!(upl_request("INF"), b"UPL\tINF\t\r\n".to_vec());
+        assert_eq!(upl_request("BMP"), b"UPL\tBMP\t\r\n".to_vec());
+    }
+    #[test]
+    fn empty_section_block_is_wire_perfect() {
+        assert_eq!(
+            empty_section_block("INF"),
+            b"\r\nDWL\tINF\t\r\nEND\tINF\t\r\n".to_vec()
+        );
+    }
+    #[test]
+    fn beacon_udp_carries_the_tcp_port() {
+        assert_eq!(parse_beacon(b"UDP\t33581\tS1\t\r\n"), Some(33581));
+    }
+    #[test]
+    fn beacon_ptr_is_not_a_port_beacon() {
+        assert_eq!(parse_beacon(b"PTR\t\r\n"), None);
+    }
+    #[test]
+    fn beacon_udp_with_port_zero_is_not_a_port_beacon() {
+        assert_eq!(parse_beacon(b"UDP\t0\t\r\n"), None);
+    }
+    #[test]
+    fn beacon_garbage_is_ignored() {
+        assert_eq!(parse_beacon(b"garbage"), None);
+    }
+    #[test]
+    fn network_sections_shape_is_valid() {
+        for (i, tag) in NETWORK_SECTIONS.iter().enumerate() {
+            assert_eq!(tag.len(), 3, "{tag} is not three characters long");
+            assert!(
+                tag.bytes().all(|b| b.is_ascii_uppercase()),
+                "{tag} is not three uppercase ASCII letters"
+            );
+            assert!(
+                !NETWORK_SECTIONS[..i].contains(tag),
+                "{tag} appears twice in NETWORK_SECTIONS"
+            );
+        }
+        // Device order and the editor's own tab order are deliberately
+        // separate lists; merging them would reorder a retrieved file.
+        assert_ne!(NETWORK_SECTIONS, REBUILT_TAGS);
     }
 }

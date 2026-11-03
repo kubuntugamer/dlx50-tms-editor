@@ -156,11 +156,16 @@ the TCP connection open; the reader stops at the END marker. Every section in
 device order is assembled, the ECS header and footer are added, and the file is
 written — a failure part-way through never leaves a half-written file.
 
-`scale-live FILE.TMS` runs this against the first scale heard.
+`--scale-live FILE.TMS` runs this against the first scale heard.
 
-The write direction is deliberately not implemented: only the read direction
-has been reverse-engineered, and an unverified write could corrupt the scale's
-live data (#7).
+Writing uses the same block shape in the other direction: the PC sends
+`\r\nDWL\t<TAG>\t\r\n`, the rows, then `END\t<TAG>\t\r\n`, and the scale applies
+it without answering. This is confirmed on a real DL-series — after a full-file
+write, a fresh retrieval is byte-identical except for the `TIM` row — but no
+vendor session was ever captured, so `--scale-upload FILE.TMS --allow-write`
+reads every section back and compares before it reports success. `TIM`
+(yy mm dd hh mm ss) is never written: a saved file's stale copy would reset the
+device clock.
 
 Discovery and file assembly both live in the Rust `ScaleTransport` in
 `src/lib.rs` (`discover`, `fetch_section`, `retrieve`).

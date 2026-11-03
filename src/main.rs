@@ -1,12 +1,15 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use tms_editor::{probe_scale, split_csv, EditError, Editor, SECTIONS};
+use tms_editor::{
+    discover, fetch_section, probe_scale, split_csv, upload_section, EditError, Editor,
+    ScaleTransport, SCALE_DISCOVER_MS, SECTIONS,
+};
 
 const VERSION: &str = env!("TMS_APP_VERSION");
 
 fn usage() {
-    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n      bulk add: each line 'CODE,NAME' (header line skipped)\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends a read-only UPL request and reports\n      what the scale answers (no write/delete/reboot/transfer sent)\n  --version | --no-update-check | --help");
+    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n      bulk add: each line 'CODE,NAME' (header line skipped)\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends a read-only UPL request and reports\n      what the scale answers (no write/delete/reboot/transfer sent)\n  dlx50-tms-editor --scale-live OUT.TMS\n      retrieve the first scale heard over the LAN into OUT.TMS (read-only;\n      exits 3 if no scale beacon is heard or a section fails)\n  dlx50-tms-editor --scale-upload FILE.TMS --allow-write\n      push every section of FILE.TMS to the first scale heard, then read each\n      section back and compare. Writing needs --allow-write; the framing is\n      not vendor-confirmed, so check the read-back result before trusting it\n  dlx50-tms-editor --scale-clock\n      set the scale's clock to this computer's local time (the device RTC\n      drifts on its own, so this is maintenance, not part of a transfer)\n  --version | --no-update-check | --help");
 }
 #[derive(Default)]
 struct Args {
@@ -21,6 +24,10 @@ struct Args {
     price: String,
     save_as: Option<PathBuf>,
     probe: Option<(String, u16, u64)>,
+    scale_live: Option<PathBuf>,
+    scale_upload: Option<PathBuf>,
+    allow_write: bool,
+    set_clock: bool,
     add_values: Vec<String>,
 }
 fn parse_args(args: &[String]) -> Result<Args, String> {
@@ -56,6 +63,38 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
                     .map_err(|_| "probe TIMEOUT_MS must be an integer")
             })?;
         out.probe = Some((host, port, timeout));
+        return Ok(out);
+    }
+    if let Some(i) = args
+        .iter()
+        .position(|a| a.eq_ignore_ascii_case("--scale-live"))
+    {
+        let out_path = args
+            .get(i + 1)
+            .filter(|s| !s.starts_with('-'))
+            .ok_or("--scale-live OUT.TMS requires an output path")?;
+        out.scale_live = Some(PathBuf::from(out_path));
+        return Ok(out);
+    }
+    if let Some(i) = args
+        .iter()
+        .position(|a| a.eq_ignore_ascii_case("--scale-upload"))
+    {
+        let path = args
+            .get(i + 1)
+            .filter(|s| !s.starts_with('-'))
+            .ok_or("--scale-upload FILE.TMS requires a file")?;
+        out.scale_upload = Some(PathBuf::from(path));
+        out.allow_write = args
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case("--allow-write"));
+        return Ok(out);
+    }
+    if args
+        .iter()
+        .any(|a| a.eq_ignore_ascii_case("--scale-clock"))
+    {
+        out.set_clock = true;
         return Ok(out);
     }
     if let Some(s) = args.iter().find(|s| !s.starts_with('-') && !s.is_empty()) {
@@ -220,6 +259,131 @@ fn do_probe(host: &str, port: u16, timeout: u64) -> i32 {
         3
     }
 }
+/// `--scale-live OUT.TMS`: discover the first scale heard, say where it is,
+/// then retrieve its live configuration. Read-only, like the probe.
+/// Local time in the shape the device stores: "yy mm dd hh mm ss", tab-separated.
+fn host_timestamp() -> Result<String, String> {
+    #[cfg(unix)]
+    let out = std::process::Command::new("date")
+        .args(["+%y %-m %-d %H %M %S"])
+        .output();
+    #[cfg(windows)]
+    let out = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-Date -Format 'yy MM d HH mm ss'",
+        ])
+        .output();
+    let out = out.map_err(|e| format!("cannot read the system clock: {e}"))?;
+    if !out.status.success() {
+        return Err("cannot read the system clock".into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    if parts.len() != 6 {
+        return Err(format!("unexpected clock format: {text:?}"));
+    }
+    Ok(parts.join("\t"))
+}
+
+/// `--scale-clock`: set the device clock to this machine's local time. The
+/// scale's RTC runs slow on its own, so this is maintenance, not a transfer.
+fn do_scale_clock() -> i32 {
+    let ts = match host_timestamp() {
+        Ok(ts) => ts,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 3;
+        }
+    };
+    let ep = match discover(SCALE_DISCOVER_MS) {
+        Ok(ep) => ep,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 3;
+        }
+    };
+    println!("scale endpoint: {}:{}", ep.host, ep.port);
+    println!("setting the device clock to {ts}");
+    if let Err(e) = upload_section(&ep, "TIM", format!("TIM\t{ts}\t\r\n").as_bytes()) {
+        eprintln!("error: {e}");
+        return 3;
+    }
+    match fetch_section(&ep, "TIM") {
+        Ok(block) => {
+            println!("device now: {:?}", String::from_utf8_lossy(&block));
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            3
+        }
+    }
+}
+
+/// `--scale-upload FILE.TMS --allow-write`: send every section, then verify by
+/// reading each one back. The write framing is unconfirmed, so the read-back is
+/// the result that counts.
+fn do_scale_upload(local_path: &PathBuf) -> i32 {
+    let mut transport = ScaleTransport::new();
+    if let Err(e) = transport.list_files() {
+        eprintln!("error: {e}");
+        return 3;
+    };
+    if let Some(ep) = transport.endpoint() {
+        println!("scale endpoint: {}:{}", ep.host, ep.port);
+    }
+    println!("writing {} to the scale…", local_path.display());
+    match transport.upload(local_path, "LIVE") {
+        Ok(()) => {
+            println!("done: every section read back matches what was sent");
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            3
+        }
+    }
+}
+fn do_scale_live(out_path: &PathBuf) -> i32 {
+    let mut transport = ScaleTransport::new();
+    let files = match transport.list_files() {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return 3;
+        }
+    };
+    if let Some(ep) = transport.endpoint() {
+        println!("scale endpoint: {}:{}", ep.host, ep.port);
+    }
+    if let Some(f) = files.first() {
+        println!(
+            "retrieving {}{} to {}",
+            f.remote_path,
+            if f.size == 0 {
+                String::new()
+            } else {
+                format!(" ({} bytes)", f.size)
+            },
+            out_path.display()
+        );
+    }
+    match transport.retrieve("LIVE", out_path) {
+        Ok(()) => {
+            println!(
+                "retrieved the scale's live configuration to {}",
+                out_path.display()
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            3
+        }
+    }
+}
 fn run(args: Vec<String>) -> i32 {
     if args.iter().any(|a| a.eq_ignore_ascii_case("--version")) {
         println!("dlx50-tms-editor {VERSION}");
@@ -239,6 +403,21 @@ fn run(args: Vec<String>) -> i32 {
     };
     if let Some((h, p, t)) = parsed.probe {
         return do_probe(&h, p, t);
+    }
+    if let Some(out_path) = parsed.scale_live {
+        return do_scale_live(&out_path);
+    }
+    if parsed.set_clock {
+        return do_scale_clock();
+    }
+    if let Some(local_path) = parsed.scale_upload {
+        if !parsed.allow_write {
+            eprintln!(
+                "error: --scale-upload writes to the scale; re-run with --allow-write to confirm"
+            );
+            return 2;
+        }
+        return do_scale_upload(&local_path);
     }
     let Some(file) = parsed.file else {
         if parsed.list

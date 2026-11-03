@@ -1,5 +1,5 @@
 use crate::updater;
-use crate::{headers, probe_scale, Editor, SECTIONS};
+use crate::{headers, probe_scale, Editor, ScaleTransport, SECTIONS};
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -134,6 +134,51 @@ impl TmsApp {
             self.status = format!("Deleted selected rows from {tag} — Save to write changes")
         }
     }
+    /// Pull the scale's live configuration over the LAN and open what came back.
+    fn retrieve_from_scale(&mut self) {
+        let Some(dest) = rfd::FileDialog::new()
+            .add_filter("TMS files", &["TMS", "tms"])
+            .set_file_name("SCALE_LIVE.TMS")
+            .save_file()
+        else {
+            return;
+        };
+        let mut transport = ScaleTransport::new();
+        match transport.retrieve("LIVE", &dest) {
+            Ok(()) => match Editor::open(&dest) {
+                Ok(e) => {
+                    self.path = Some(dest.clone());
+                    self.editor = Some(e);
+                    self.status = format!("Retrieved from the scale: {}", dest.display());
+                }
+                Err(e) => {
+                    self.status = format!("Retrieved {} but cannot open it: {e}", dest.display())
+                }
+            },
+            Err(e) => self.status = format!("Scale retrieval failed: {e}"),
+        }
+    }
+
+    /// Send what the editor currently holds to the scale. The transport reads
+    /// every section back afterwards, so a silent no-op cannot look like success.
+    fn upload_to_scale(&mut self) {
+        let Some(editor) = &self.editor else {
+            self.status = "Open a .TMS file first — there is nothing to upload.".into();
+            return;
+        };
+        let tmp = std::env::temp_dir().join(format!("dlx50-upload-{}.TMS", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, editor.serialize()) {
+            self.status = format!("Upload failed: cannot stage the file: {e}");
+            return;
+        }
+        let mut transport = ScaleTransport::new();
+        let result = transport.upload(&tmp, "LIVE");
+        let _ = std::fs::remove_file(&tmp);
+        self.status = match result {
+            Ok(()) => "Upload finished: every section read back matches".into(),
+            Err(e) => format!("Upload failed: {e}"),
+        };
+    }
     fn probe(&mut self) {
         let host = self.probe_host.trim().to_owned();
         let port = self.probe_port.parse::<u16>();
@@ -236,15 +281,12 @@ impl eframe::App for TmsApp {
                     }
                     ui.separator();
                     ui.menu_button("Scale…", |ui| {
-                        if ui
-                            .button("Retrieve from scale… (not implemented)")
-                            .clicked()
-                        {
-                            self.status = "Scale retrieval is not implemented yet.".into();
+                        if ui.button("Retrieve from scale over the LAN…").clicked() {
+                            self.retrieve_from_scale();
                             ui.close_menu();
                         }
-                        if ui.button("Upload to scale… (not implemented)").clicked() {
-                            self.status = "Scale upload is not implemented yet.".into();
+                        if ui.button("Upload to scale over the LAN…").clicked() {
+                            self.upload_to_scale();
                             ui.close_menu();
                         }
                         ui.separator();
