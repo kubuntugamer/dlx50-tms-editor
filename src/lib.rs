@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -569,6 +569,359 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+// ---------------------------------------------------------------------------
+// DL-series scale transport, read-only (issues #7 / #8).
+//
+// Ported from the Qt implementation parked on `qt-network-transport`; the
+// protocol was recovered black-box from the scale's own beacons and from the
+// .NET user-string heap of the OEM's management program. Everything on the
+// wire is ASCII, TAB-separated and CRLF-terminated:
+//
+//   request : "UPL\t<SECTION>\t\r\n"      PC -> scale (read-only)
+//   response: "\r\nDWL\t<SECTION>\t\r\n"
+//             "<SECTION>\t<fields>\t\r\n"    zero or more data rows
+//             "END\t<SECTION>\t\r\n"
+//
+// The scale keeps the connection open after answering, so the reader stops at
+// the END marker instead of waiting for the peer to close, and an unknown or
+// empty section is answered with an empty DWL/END pair — exactly what an empty
+// section looks like in a real export.
+//
+// The write direction stays unimplemented: only the read direction has been
+// reverse-engineered, and an unverified write could corrupt the scale's live
+// data (#7).
+// ---------------------------------------------------------------------------
+
+/// Spec166 default TCP port for the scale's server.
+pub const SCALE_DEFAULT_PORT: u16 = 33581;
+/// Destination of the scale's ~10 s beacon ("PTR\t\r\n").
+pub const SCALE_BEACON_PORT: u16 = 33594;
+/// Destination of the ~60 s beacon ("UDP\t<port>\t<station>\t\r\n"), which
+/// also carries the scale's TCP port.
+pub const SCALE_INFO_PORT: u16 = 33584;
+/// Discovery must outlast the 10 s beacon gap.
+pub const SCALE_DISCOVER_MS: u64 = 12_000;
+/// Per-section deadline; PLU takes ~6 s end to end, so this leaves headroom.
+pub const SCALE_SECTION_MS: u64 = 30_000;
+/// Poll slice while waiting on two sockets during discovery.
+pub const SCALE_POLL_MS: u64 = 250;
+
+/// The file's own header. The scale exposes no section for it and Save only
+/// rewrites an existing "END\tECS" line rather than adding one, so a
+/// retrieved file has to carry the header and footer itself. 254 is what this
+/// device family's exports start with; the OEM's generic template ships 100.
+pub const ECS_HEADER: &str = "ECS\tVER\t254\t\r\n";
+/// The file's own footer.
+pub const ECS_FOOTER: &str = "\r\nEND\tECS\t\r\n";
+
+/// Section order copied from a real device export — the order the network
+/// path requests them in. Deliberately distinct from `REBUILT_TAGS`, which is
+/// the editor's own tab order.
+pub const NETWORK_SECTIONS: &[&str] = &[
+    "DPT", "CLS", "PLU", "UNT", "BAR", "LAB", "SAL", "REP", "SCF", "SCP", "TMS", "TMT", "TMR",
+    "INF", "TIM", "BMP",
+];
+
+/// One read-only section request: "UPL\t<TAG>\t\r\n".
+pub fn upl_request(tag: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tag.len() + 6);
+    out.extend_from_slice(b"UPL\t");
+    out.extend_from_slice(tag.as_bytes());
+    out.extend_from_slice(b"\t\r\n");
+    out
+}
+
+/// The wire-perfect block for a section with no rows — also the answer the
+/// scale gives for an unknown section.
+pub fn empty_section_block(tag: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(tag.len() * 2 + 16);
+    out.extend_from_slice(b"\r\nDWL\t");
+    out.extend_from_slice(tag.as_bytes());
+    out.extend_from_slice(b"\t\r\nEND\t");
+    out.extend_from_slice(tag.as_bytes());
+    out.extend_from_slice(b"\t\r\n");
+    out
+}
+
+/// "UDP\t<port>\t<station>\t\r\n" -> the scale's TCP port. Anything else
+/// (the 10 s "PTR\t\r\n" beacon, for instance) returns None and the caller
+/// keeps the Spec166 default.
+pub fn parse_beacon(datagram: &[u8]) -> Option<u16> {
+    if !datagram.starts_with(b"UDP\t") {
+        return None;
+    }
+    let text = std::str::from_utf8(datagram).ok()?;
+    let mut fields = text.split('\t');
+    if fields.next()? != "UDP" {
+        return None;
+    }
+    let port: u16 = fields.next()?.trim().parse().ok()?;
+    (port != 0).then_some(port)
+}
+
+/// Where a scale was heard: its address and (from the 60 s beacon, or the
+/// Spec166 default) its TCP port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Endpoint {
+    pub host: String,
+    pub port: u16,
+    pub heard_beacon: bool,
+}
+
+/// Wait passively for a scale beacon — the way the vendor's utility does it.
+/// Any beacon names the scale; only the 60 s one replaces the default port.
+pub fn discover(timeout_ms: u64) -> Result<Endpoint, String> {
+    let beacon = UdpSocket::bind(("0.0.0.0", SCALE_BEACON_PORT));
+    let info = UdpSocket::bind(("0.0.0.0", SCALE_INFO_PORT));
+    if beacon.is_err() && info.is_err() {
+        return Err(format!(
+            "cannot listen on UDP {SCALE_BEACON_PORT}/{} for the scale's beacon — both ports are already in use",
+            SCALE_INFO_PORT
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut buf = [0u8; 2048];
+    'wait: loop {
+        for sock in [&beacon, &info].into_iter().flatten() {
+            let now = Instant::now();
+            if now >= deadline {
+                break 'wait;
+            }
+            let left = (deadline - now).as_millis() as u64;
+            let slice = left.min(SCALE_POLL_MS).max(1);
+            if sock.set_read_timeout(Some(Duration::from_millis(slice))).is_err() {
+                continue;
+            }
+            match sock.recv_from(&mut buf) {
+                Ok((n, from)) => {
+                    let ip = from.ip();
+                    if ip.is_unspecified() {
+                        continue;
+                    }
+                    return Ok(Endpoint {
+                        host: ip.to_string(),
+                        port: parse_beacon(&buf[..n]).unwrap_or(SCALE_DEFAULT_PORT),
+                        heard_beacon: true,
+                    });
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock
+                            | io::ErrorKind::TimedOut
+                            | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+    Err(format!(
+        "no scale beacon heard on UDP {SCALE_BEACON_PORT}/{} within {timeout_ms} ms — is the scale powered and on this network?",
+        SCALE_INFO_PORT
+    ))
+}
+
+/// One read-only UPL exchange. Fails unless the response both starts with
+/// "\r\nDWL\t<TAG>\t\r\n" and ends with "END\t<TAG>\t\r\n", so a truncated
+/// or garbled answer is never mistaken for a good one. There is deliberately
+/// no idle timeout inside a section: the scale pauses between row batches.
+pub fn fetch_section(ep: &Endpoint, tag: &str) -> Result<Vec<u8>, String> {
+    let start = format!("\r\nDWL\t{tag}\t\r\n");
+    let end = format!("END\t{tag}\t\r\n");
+
+    let addr = (ep.host.as_str(), ep.port)
+        .to_socket_addrs()
+        .map_err(|e| format!("could not resolve scale at {}:{}: {e}", ep.host, ep.port))?
+        .next()
+        .ok_or_else(|| format!("could not resolve scale at {}:{}", ep.host, ep.port))?;
+
+    let mut sock =
+        TcpStream::connect_timeout(&addr, Duration::from_millis(SCALE_SECTION_MS)).map_err(|e| {
+            format!("could not connect to scale at {}:{}: {e}", ep.host, ep.port)
+        })?;
+
+    let started = Instant::now();
+    let left = || -> Option<Duration> {
+        let ms = SCALE_SECTION_MS.saturating_sub(started.elapsed().as_millis() as u64);
+        (ms > 0).then_some(Duration::from_millis(ms))
+    };
+
+    let request = upl_request(tag);
+    if let Some(d) = left() {
+        let _ = sock.set_write_timeout(Some(d));
+    }
+    sock.write_all(&request)
+        .map_err(|e| format!("could not send UPL {tag} to the scale: {e}"))?;
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let Some(d) = left() else {
+            return Err(format!(
+                "section {tag} timed out after {SCALE_SECTION_MS} ms ({} bytes)",
+                buf.len()
+            ));
+        };
+        if sock.set_read_timeout(Some(d)).is_err() {
+            break;
+        }
+        match sock.read(&mut chunk) {
+            Ok(0) => break, // peer went away; the END check below decides
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.ends_with(end.as_bytes()) {
+                    break;
+                }
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                break;
+            }
+            Err(e) => return Err(format!("read from scale failed for section {tag}: {e}")),
+        }
+    }
+
+    if !buf.starts_with(start.as_bytes()) {
+        return Err(if buf.is_empty() {
+            format!("the scale sent no data for section {tag}")
+        } else {
+            format!(
+                "section {tag} did not start with DWL: {}",
+                String::from_utf8_lossy(&buf[..buf.len().min(60)])
+            )
+        });
+    }
+    if !buf.ends_with(end.as_bytes()) {
+        return Err(format!(
+            "section {tag} was truncated ({} bytes, no END marker)",
+            buf.len()
+        ));
+    }
+    Ok(buf)
+}
+
+/// Why a transport operation could not complete.
+#[derive(Debug, PartialEq, Eq)]
+pub enum TransportError {
+    /// The scale or backend does not implement this operation at all.
+    NotSupported(String),
+    /// The scale could not be reached.
+    Unreachable(String),
+    /// The scale answered with something the protocol does not allow.
+    Protocol(String),
+    /// Local file I/O failed.
+    Io(String),
+}
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSupported(s) | Self::Unreachable(s) | Self::Protocol(s) | Self::Io(s) => {
+                f.write_str(s)
+            }
+        }
+    }
+}
+pub type TransportResult<T> = Result<T, TransportError>;
+
+/// One logical file a transport offers. The network protocol has no file
+/// listing — it streams the scale's live configuration as sections, which
+/// assemble into a single `.TMS`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransportFile {
+    pub remote_path: String,
+    pub local_name: String,
+    /// Not known until the sections are fetched.
+    pub size: u64,
+}
+
+/// Read-only network transport for a DL-series scale: discover by beacon,
+/// fetch every section in device order, assemble a device-exact `.TMS`.
+#[derive(Default)]
+pub struct ScaleTransport {
+    endpoint: Option<Endpoint>,
+}
+
+impl ScaleTransport {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cached so list and retrieve do not each pay for the next beacon wait.
+    fn ensure_endpoint(&mut self) -> TransportResult<Endpoint> {
+        if let Some(ep) = &self.endpoint {
+            return Ok(ep.clone());
+        }
+        let ep = discover(SCALE_DISCOVER_MS).map_err(TransportError::Unreachable)?;
+        self.endpoint = Some(ep.clone());
+        Ok(ep)
+    }
+
+    /// Offer the scale's live configuration as the single logical file.
+    pub fn list_files(&mut self) -> TransportResult<Vec<TransportFile>> {
+        self.ensure_endpoint()?;
+        Ok(vec![TransportFile {
+            remote_path: "LIVE".into(),
+            local_name: "SCALE_LIVE.TMS".into(),
+            size: 0,
+        }])
+    }
+
+    /// Fetch every section in device order and assemble the file in memory,
+    /// so a failure part-way through never leaves a half-written file behind.
+    pub fn retrieve(&mut self, remote_path: &str, local_path: &Path) -> TransportResult<()> {
+        if !remote_path.is_empty() && remote_path != "LIVE" {
+            return Err(TransportError::NotSupported(format!(
+                "the network transport only offers the scale's live configuration (LIVE), not '{remote_path}'"
+            )));
+        }
+        let ep = self.ensure_endpoint()?;
+
+        let mut content = ECS_HEADER.as_bytes().to_vec();
+        let mut first = true;
+        for &section in NETWORK_SECTIONS {
+            match fetch_section(&ep, section) {
+                Ok(block) => content.extend_from_slice(&block),
+                Err(e) => {
+                    // A failure on the very first section usually means the
+                    // cached address went stale (scale rebooted / DHCP moved
+                    // it), so drop it and let the next attempt rediscover.
+                    if first {
+                        self.endpoint = None;
+                    }
+                    return Err(TransportError::Protocol(e));
+                }
+            }
+            first = false;
+        }
+        content.extend_from_slice(ECS_FOOTER.as_bytes());
+
+        fs::write(local_path, &content).map_err(|e| {
+            TransportError::Io(format!("cannot write {}: {e}", local_path.display()))
+        })?;
+        Ok(())
+    }
+
+    /// The write direction is deliberately refused: only the read direction
+    /// has been reverse-engineered, and an unverified write could corrupt the
+    /// scale's live data (#7).
+    pub fn upload(&self, _local_path: &Path, _remote_path: &str) -> TransportResult<()> {
+        Err(TransportError::NotSupported(
+            "writing to the scale is not implemented — only the read-only UPL direction has been reverse-engineered, and an unverified write could corrupt the scale's live data (#7)"
+                .into(),
+        ))
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct ProbeResult {
     pub connected: bool,
@@ -611,10 +964,17 @@ pub fn probe_scale(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
     };
     r.connected = true;
     r.observations.push(format!("connected to {host}:{port}"));
-    if let Err(e) = s.write_all(b"SCAL\x01\0\0\0") {
+    // Issue #14 / 2b: the old 8-byte "SCAL" handshake was a placeholder —
+    // the real protocol is known now, and a read-only UPL request is both the
+    // truthful probe and a safe one: it only ever asks the scale to send.
+    let request = upl_request("INF");
+    if let Err(e) = s.write_all(&request) {
         r.observations.push(format!("probe send failed: {e}"));
     } else {
-        r.observations.push("sent 8-byte probe payload".into());
+        r.observations.push(format!(
+            "sent read-only request: {}",
+            String::from_utf8_lossy(&request).trim_end()
+        ));
     }
     let _ = s.set_read_timeout(Some(Duration::from_millis(150)));
     let mut buf = [0u8; 4096];
@@ -678,6 +1038,9 @@ pub fn probe_scale(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
             notes.push(format!("decoded as UTF-8 ({}):", text.len()));
             notes.extend(text.lines().map(|l| format!("  | {}", l.trim())));
         }
+        if r.raw.starts_with(b"\r\nDWL\t") && r.raw.windows(4).any(|w| w == b"END\t") {
+            notes.push("the answer is a framed DWL…END section response — that is the read-only UPL transfer protocol (#7/#8), not an error.".into());
+        }
         if text.to_ascii_uppercase().contains("ERROR") || text.to_ascii_uppercase().contains("ERR")
         {
             notes.push("scale returned an error-style payload — likely an unsupported command or missing authentication.".into());
@@ -687,7 +1050,11 @@ pub fn probe_scale(host: &str, port: u16, timeout_ms: u64) -> ProbeResult {
             notes.push("payload mentions TMS/DLX — likely relevant to the transfer protocol we are trying to discover.".into());
         }
         r.summary = notes.join("\n");
-        r.observations = notes;
+        // Keep the earlier observations (connected / sent request /
+        // received count) so the full transcript is inspectable.
+        let mut transcript = std::mem::take(&mut r.observations);
+        transcript.extend(notes);
+        r.observations = transcript;
     }
     r
 }

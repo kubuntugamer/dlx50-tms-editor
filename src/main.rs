@@ -6,7 +6,7 @@ use tms_editor::{probe_scale, split_csv, EditError, Editor, SECTIONS};
 const VERSION: &str = env!("TMS_APP_VERSION");
 
 fn usage() {
-    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n      bulk add: each line 'CODE,NAME' (header line skipped)\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends the 8-byte probe and reports response\n  --version | --no-update-check | --help");
+    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n      bulk add: each line 'CODE,NAME' (header line skipped)\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends a read-only UPL request and reports\n      what the scale answers (no write/delete/reboot/transfer sent)\n  --version | --no-update-check | --help");
 }
 #[derive(Default)]
 struct Args {
@@ -181,7 +181,7 @@ fn csv_rows(path: &PathBuf) -> Result<Vec<(String, String)>, EditError> {
     Ok(rows)
 }
 fn do_probe(host: &str, port: u16, timeout: u64) -> i32 {
-    println!("dlx50-tms-editor network probe (issue #8)\n  target : {host}:{port}\n  timeout: {timeout} ms\n  mode   : read-only (no write/delete/reboot/transfer sent)\n");
+    println!("dlx50-tms-editor network probe (issue #8)\n  target : {host}:{port}\n  timeout: {timeout} ms\n  mode   : read-only — sends a read-only UPL request for the INF section, no write/delete/reboot/transfer sent\n");
     let r = probe_scale(host, port, timeout);
     println!(
         "--- connection ---\n  connected : {}\n  host      : {}\n  port      : {}\n",

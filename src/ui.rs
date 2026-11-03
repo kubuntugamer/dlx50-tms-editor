@@ -289,7 +289,7 @@ impl eframe::App for TmsApp {
                 if let Some(err)=edit_error{self.status=err;}
             }else{ui.heading("TMS / DLX-50-style Editor");ui.label("Open a .TMS file to browse or edit its sections.");if ui.button("Open .TMS file…").clicked(){self.open();}}
             ui.separator();            ui.collapsing("Scale probe (read-only)", |ui| {
-                ui.horizontal(|ui| {ui.label("Host");ui.text_edit_singleline(&mut self.probe_host);ui.label("Port");ui.add(egui::TextEdit::singleline(&mut self.probe_port).desired_width(70.0));ui.label("Timeout ms");ui.add(egui::TextEdit::singleline(&mut self.probe_timeout).desired_width(90.0));if ui.button("Run probe").clicked(){self.probe();}});ui.label("Sends the current 8-byte probe only; no write, delete, reboot, or transfer command.");if !self.probe_output.is_empty(){ui.add(egui::TextEdit::multiline(&mut self.probe_output).desired_rows(8).code_editor());}});
+                ui.horizontal(|ui| {ui.label("Host");ui.text_edit_singleline(&mut self.probe_host);ui.label("Port");ui.add(egui::TextEdit::singleline(&mut self.probe_port).desired_width(70.0));ui.label("Timeout ms");ui.add(egui::TextEdit::singleline(&mut self.probe_timeout).desired_width(90.0));if ui.button("Run probe").clicked(){self.probe();}});                ui.label("Sends a read-only UPL request for the INF section only; no write, delete, reboot, or transfer command.");if !self.probe_output.is_empty(){ui.add(egui::TextEdit::multiline(&mut self.probe_output).desired_rows(8).code_editor());}});
             if !self.update_output.is_empty() {
                 ui.separator();
                 ui.collapsing("Update check", |ui| {
