@@ -21,10 +21,14 @@ PLU schemas.
 
 - Open, edit, add and delete rows across section tabs.
 - **Ctrl+S** saves in place after making a `.BAK`; **Ctrl+Shift+S** opens Save As.
-- The read-only scale probe sends the current 8-byte handshake and captures
-  the response; it does not send transfer, write, delete, or reboot commands.
-- USB, serial, retrieve, and upload are not implemented until the hardware
-  protocol is known. The probe itself remains available without the cable.
+- The read-only scale probe connects to the scale and sends a single
+  `UPL\tINF\t\r\n` section request, then captures the framed `DWL…END`
+  response. It sends no write, delete, reboot, or transfer command, and it
+  needs no USB cable.
+- The network transport (UDP beacon discovery plus per-section fetch) is
+  implemented in the library and covered by tests, but is not yet exposed as
+  a CLI or GUI retrieve/upload command. USB and serial remain unimplemented
+  until the hardware protocol is known.
 - Help → Check for Updates checks GitHub Releases. A download is installed
   only after you explicitly confirm, and a published `SHA256SUMS.txt` must
   download and match before installation. Linux installation uses `pkexec`;
