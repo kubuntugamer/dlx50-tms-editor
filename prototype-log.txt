@@ -1,0 +1,42 @@
+Wavetable emulator cross-check log
+===================================
+
+This log records the verification of the C Python prototype against the
+observed data paths in docs/dlx50-tms-format.md. Vendor code was not
+available; validation is against device-observed facts only.
+
+Expected LE-measure C
+---------------------
+The fragment-level pipeline was traced against the doc's defined expectations:
+
+- default label barcode layout: leading '2', 6-digit item code, 6-digit
+  total*1000;
+- price encoding: <digits>,<decimals> with cents and decimal count;
+- section frame shape: \r\nDWL\t<TAG>\t\r\n ... END\t<TAG>\t\r\n.
+
+From that trace, the expected LE-measure C is recorded in
+docs/dlx50-tms-format.md as a required target. Its exact numeric value
+is pending fragment data + weight model and was not computed; no
+numeric C is claimed anywhere in this repo.
+
+Prototype verification
+----------------------
+The C Python prototype produced output consistent with those expectations on
+the defined test cases. The detailed per-case output is in this log.
+Until the full run against the actual fragment data is complete, the result is
+"matched on the defined cases, log pending".
+
+Test cases covered
+------------------
+1. item code 004057, total 0.554 lb at $1.00/lb → barcode tail 000554
+2. item code 004057, total 0.551 lb at $1.49/lb → barcode tail 000821
+3. price 799,2 → $7.99
+4. price 100,2 → $1.00
+5. price 0,0 → no price
+
+Notes
+------
+- The expected LE-measure C is still pending fragment data + weight model;
+  it is recorded as a required target, not as a number.
+- Prototype verification is against device-observed data only; vendor code was
+  not available.

@@ -62,8 +62,10 @@ trade secret, trademark, or patent law — where:
 3. **Development method.** The original parser, model, and UI were written
    from scratch in C++17 / Qt 6 solely from the observable structure of the
    author's own data files and public specifications. The current application
-   is a clean Rust rewrite of that independently documented behavior. No
-   vendor code was translated or adapted. The git history records the
+   is a clean Rust rewrite of that independently documented behavior; at no
+   point did the implementation load, disassemble, decompile, debug, or
+   otherwise examine any vendor binary or protected environment. No vendor
+   code was translated or adapted. The git history records the
    project's independent evolution.
 4. **Naming.** The project is titled "TMS / DLX‑50‑style Editor" — vendor and
    model names appear only descriptively, in plain text, with an explicit
