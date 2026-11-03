@@ -23,10 +23,14 @@ depends=$(printf '%s\n' "${!pkgs[@]}" | sort | paste -sd ', ' -)
 echo "Derived Depends: ${depends:-none}"
 ROOT="out/deb-root"
 rm -rf "$ROOT"
-mkdir -p "$ROOT/opt/$PKG" "$ROOT/usr/bin" "$ROOT/usr/share/applications" "$ROOT/usr/share/doc/$PKG" "$ROOT/DEBIAN"
+mkdir -p "$ROOT/opt/$PKG" "$ROOT/usr/bin" "$ROOT/usr/share/applications" "$ROOT/usr/share/doc/$PKG" \
+  "$ROOT/usr/share/icons/hicolor/256x256/apps" "$ROOT/DEBIAN"
 install -m 755 "$BIN" "$ROOT/opt/$PKG/tms_editor"
 ln -s "/opt/$PKG/tms_editor" "$ROOT/usr/bin/$PKG"
 install -m 644 packaging/dlx50-tms-editor.desktop "$ROOT/usr/share/applications/$PKG.desktop"
+# The desktop entry names this icon, so the package has to carry it or the
+# launcher falls back to a generic one.
+install -m 644 packaging/dlx50-tms-editor.png "$ROOT/usr/share/icons/hicolor/256x256/apps/$PKG.png"
 install -m 644 LICENSE "$ROOT/usr/share/doc/$PKG/copyright"
 {
 cat <<EOF

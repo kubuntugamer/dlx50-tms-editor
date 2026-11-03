@@ -129,12 +129,19 @@ jobs:
           install -m 755 target/release/dlx50-tms-editor AppDir/usr/bin/dlx50-tms-editor
           install -m 644 packaging/dlx50-tms-editor.desktop AppDir/usr/share/applications/dlx50-tms-editor.desktop
           install -m 644 packaging/dlx50-tms-editor.desktop AppDir/dlx50-tms-editor.desktop
+          install -m 644 packaging/dlx50-tms-editor.png AppDir/usr/share/icons/hicolor/256x256/apps/dlx50-tms-editor.png
           install -m 644 LICENSE AppDir/usr/share/doc/dlx50-tms-editor/copyright
           printf '#!/bin/sh\nHERE="$(dirname "$(readlink -f "$0")")"\nexec "$HERE/usr/bin/dlx50-tms-editor" "$@"\n' > AppDir/AppRun
           chmod +x AppDir/AppRun
+          # linuxdeploy derives its output filename from the desktop Name, and
+          # "TMS / DLX-50-style Editor" contains a slash, which no filename can.
+          # Only the copies inside the AppDir get a slash-free name.
+          sed -i 's|^Name=.*|Name=TMS DLX-50-style Editor|' \
+            AppDir/usr/share/applications/dlx50-tms-editor.desktop AppDir/dlx50-tms-editor.desktop
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O linuxdeploy.AppImage
           chmod +x linuxdeploy.AppImage
-          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir --output appimage
+          ./linuxdeploy.AppImage --appimage-extract-and-run --appdir AppDir \
+            --icon-file packaging/dlx50-tms-editor.png --output appimage
           APPIMAGE=$(find . -maxdepth 1 -type f -name '*.AppImage' ! -name 'linuxdeploy.AppImage' -print -quit)
           test -n "$APPIMAGE"
           mv "$APPIMAGE" dist/dlx50-tms-editor-x86_64.AppImage
