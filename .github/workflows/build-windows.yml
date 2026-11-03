@@ -57,9 +57,12 @@ jobs:
           sudo apt-get update
           # No wayland-utils: it does not exist in jammy, and apt aborts the
           # whole step when one name is missing. The Wayland step below waits on
-          # weston's socket instead of on wayland-info.
+          # weston's socket instead of on wayland-info. libxkbcommon-x11-0 is
+          # loaded at runtime by the X11 backend; without it the GUI dies before
+          # its window exists.
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libx11-dev libxkbcommon-dev libwayland-dev \
+            build-essential pkg-config libx11-dev libxkbcommon-dev \
+            libxkbcommon-x11-0 libwayland-dev \
             libegl1-mesa-dev libgl1-mesa-dev xvfb xdotool weston \
             desktop-file-utils fakeroot dpkg-dev binutils
       - name: Build and test
