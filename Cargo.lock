@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "dlx50-tms-editor"
-version = "1.6.0"
+version = "1.6.1"
 dependencies = [
  "eframe",
  "reqwest",
