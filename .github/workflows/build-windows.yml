@@ -124,7 +124,8 @@ jobs:
           packaging/make-deb.sh "$VER" target/release/dlx50-tms-editor dist
       - name: Build portable AppImage
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps \
+            AppDir/usr/share/doc/dlx50-tms-editor
           install -m 755 target/release/dlx50-tms-editor AppDir/usr/bin/dlx50-tms-editor
           install -m 644 packaging/dlx50-tms-editor.desktop AppDir/usr/share/applications/dlx50-tms-editor.desktop
           install -m 644 packaging/dlx50-tms-editor.desktop AppDir/dlx50-tms-editor.desktop
