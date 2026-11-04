@@ -264,6 +264,9 @@ impl eframe::App for TmsApp {
                 self.save()
             }
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::Q) && i.modifiers.command) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -295,6 +298,11 @@ impl eframe::App for TmsApp {
                             ui.close_menu();
                         }
                     });
+                    ui.separator();
+                    if ui.button("Quit  Ctrl+Q").clicked() {
+                        ui.close_menu();
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("Check for Updates…").clicked() {
