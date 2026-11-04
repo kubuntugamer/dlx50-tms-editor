@@ -1,6 +1,6 @@
 [package]
 name = "dlx50-tms-editor"
-version = "1.6.2"
+version = "1.6.3"
 edition = "2021"
 description = "Cross-platform editor for DETECTO .TMS scale files"
 license = "MIT"
