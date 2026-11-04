@@ -54,6 +54,8 @@ dlx50-tms-editor FILE.TMS --set PLU 0 2 "Edited Name"
 dlx50-tms-editor FILE.TMS --delete-row PLU 0
 dlx50-tms-editor FILE.TMS --set PLU 0 2 "Saved As" --save-as copy.TMS
 dlx50-tms-editor --probe-scale 10.86.215.95 9100 10000
+dlx50-tms-editor FILE.TMS --scale-upload --dry-run   # report what differs, write nothing
+dlx50-tms-editor --scale-clock               # set the scale's clock from this computer
 ```
 
 `--list` prints a header and tab-separated rows. Mutations back up to
