@@ -295,7 +295,7 @@ impl eframe::App for TmsApp {
                             ui.close_menu();
                         }
                         ui.separator();
-                        if ui.button("Probe scale (read-only, issue #8)…").clicked() {
+                        if ui.button("Probe scale (read-only)…").clicked() {
                             self.probe_open = true;
                             ui.close_menu();
                         }

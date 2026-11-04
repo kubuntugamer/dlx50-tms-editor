@@ -222,7 +222,7 @@ fn csv_rows(path: &PathBuf) -> Result<Vec<(String, String)>, EditError> {
     Ok(rows)
 }
 fn do_probe(host: &str, port: u16, timeout: u64) -> i32 {
-    println!("dlx50-tms-editor network probe (issue #8)\n  target : {host}:{port}\n  timeout: {timeout} ms\n  mode   : read-only — sends a read-only UPL request for the INF section, no write/delete/reboot/transfer sent\n");
+    println!("dlx50-tms-editor network probe (read-only)\n  target : {host}:{port}\n  timeout: {timeout} ms\n  mode   : read-only — sends a read-only UPL request for the INF section, no write/delete/reboot/transfer sent\n");
     let r = probe_scale(host, port, timeout);
     println!(
         "--- connection ---\n  connected : {}\n  host      : {}\n  port      : {}\n",
@@ -254,7 +254,7 @@ fn do_probe(host: &str, port: u16, timeout: u64) -> i32 {
             Err(_) => println!("  utf8      : (not valid UTF-8 — see hex above)"),
         }
     }
-    println!("\n--- summary for issue #8 ---\n{}\n\n--- next steps (paste into issue #7/8) ---\n  - target   : {}:{}\n  - connected: {}\n  - bytes    : {}\n  - probe    : read-only, no write/delete/reboot/transfer sent",r.summary,r.host,r.port,if r.connected{"yes"}else{"no"},r.raw.len());
+    println!("\n--- probe summary ---\n{}\n\n--- next steps ---\n  - target   : {}:{}\n  - connected: {}\n  - bytes    : {}\n  - probe    : read-only, no write/delete/reboot/transfer sent",r.summary,r.host,r.port,if r.connected{"yes"}else{"no"},r.raw.len());
     if r.connected {
         0
     } else {
