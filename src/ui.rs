@@ -20,6 +20,7 @@ struct TmsApp {
     selected: usize,
     status: String,
     probe_host: String,
+    probe_open: bool,
     probe_port: String,
     probe_timeout: String,
     probe_output: String,
@@ -55,6 +56,7 @@ impl TmsApp {
             selected: 0,
             status,
             probe_host: "10.86.215.95".into(),
+            probe_open: false,
             probe_port: "9100".into(),
             probe_timeout: "10000".into(),
             probe_output: String::new(),
@@ -294,7 +296,7 @@ impl eframe::App for TmsApp {
                         }
                         ui.separator();
                         if ui.button("Probe scale (read-only, issue #8)…").clicked() {
-                            self.probe_output.clear();
+                            self.probe_open = true;
                             ui.close_menu();
                         }
                     });
@@ -338,7 +340,8 @@ impl eframe::App for TmsApp {
                 egui::ScrollArea::both().auto_shrink([false;2]).show(ui,|ui|{egui::Grid::new(format!("table-{tag}")).striped(true).show(ui,|ui|{for h in rows.first().into_iter().flatten(){ui.strong(h.as_str());}ui.end_row();for (r,cells) in rows.iter().enumerate().skip(1){let mut checked=self.selected_rows.contains(&(r-1));if ui.checkbox(&mut checked,format!("{}",r-1)).changed(){if checked{self.selected_rows.push(r-1)}else{self.selected_rows.retain(|x|*x!=r-1)}}for (c,cell) in cells.iter().enumerate(){let mut value=cell.clone();let response=ui.add_sized([if c==4{280.0}else{150.0},22.0],egui::TextEdit::singleline(&mut value));if response.changed(){if let Some(editor)=&mut self.editor{if let Err(err)=editor.set(tag,r-1,c,&value){edit_error=Some(err.to_string());}}}}ui.end_row();}})});
                 if let Some(err)=edit_error{self.status=err;}
             }else{ui.heading("TMS / DLX-50-style Editor");ui.label("Open a .TMS file to browse or edit its sections.");if ui.button("Open .TMS file…").clicked(){self.open();}}
-            ui.separator();            ui.collapsing("Scale probe (read-only)", |ui| {
+            ui.separator();
+            egui::CollapsingHeader::new("Scale probe (read-only)").open(std::mem::take(&mut self.probe_open).then_some(true)).show(ui, |ui| {
                 ui.horizontal(|ui| {ui.label("Host");ui.text_edit_singleline(&mut self.probe_host);ui.label("Port");ui.add(egui::TextEdit::singleline(&mut self.probe_port).desired_width(70.0));ui.label("Timeout ms");ui.add(egui::TextEdit::singleline(&mut self.probe_timeout).desired_width(90.0));if ui.button("Run probe").clicked(){self.probe();}});                ui.label("Sends a read-only UPL request for the INF section only; no write, delete, reboot, or transfer command.");if !self.probe_output.is_empty(){ui.add(egui::TextEdit::multiline(&mut self.probe_output).desired_rows(8).code_editor());}});
             if !self.update_output.is_empty() {
                 ui.separator();
