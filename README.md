@@ -28,7 +28,9 @@ PLU schemas.
   every one of them again and compares. The write framing is confirmed against
   real hardware — a full write followed by a fresh retrieval is byte-identical
   apart from the clock row — but it was never captured from the OEM program, so
-  the read-back is what proves it. The `TIM` clock section is never written.
+  the read-back is what proves it. The device-owned `TIM` clock and `REP` sale
+  log are never written: a saved file's stale clock copy would reset the device
+  time, and writing `REP` clears the scale's sale log.
 - The read-only probe sends a single `UPL\tINF\t\r\n` and captures the framed
   `DWL…END` reply. USB and serial remain unimplemented until the hardware
   protocol is known.

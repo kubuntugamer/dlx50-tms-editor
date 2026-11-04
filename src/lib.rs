@@ -592,7 +592,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 // applies it without answering. Verified against a real DL-series (a full write
 // followed by a retrieval is byte-identical apart from the clock row) but never
 // captured from the OEM program, so `upload` re-reads every section instead of
-// trusting the send. The device clock section (TIM) is never written.
+// trusting the send. The device-owned sections (TIM clock, REP sale log) are
+// never written.
 // ---------------------------------------------------------------------------
 
 /// Spec166 default TCP port for the scale's server.
@@ -657,10 +658,11 @@ pub fn section_rows(file: &[u8], tag: &str) -> Vec<u8> {
     file[from..from + len].to_vec()
 }
 
-/// Sections whose value belongs to the device, not to a saved file. `TIM` is
-/// the scale's running clock (yy mm dd hh mm ss): writing a file's stale copy
-/// back would reset it, so uploads skip it and the read-back ignores it.
-pub const VOLATILE_SECTIONS: &[&str] = &["TIM"];
+/// Sections whose value belongs to the device, not to a saved file, so uploads
+/// skip them and the read-back ignores them. `TIM` is the scale's running clock
+/// (yy mm dd hh mm ss): writing a file's stale copy back would reset it. `REP`
+/// is the sale log: the scale clears it on a write instead of storing the rows.
+pub const VOLATILE_SECTIONS: &[&str] = &["TIM", "REP"];
 
 /// One read-only section request: "UPL\t<TAG>\t\r\n".
 pub fn upl_request(tag: &str) -> Vec<u8> {

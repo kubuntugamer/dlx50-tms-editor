@@ -165,7 +165,9 @@ write, a fresh retrieval is byte-identical except for the `TIM` row — but no
 vendor session was ever captured, so `--scale-upload FILE.TMS --allow-write`
 reads every section back and compares before it reports success. `TIM`
 (yy mm dd hh mm ss) is never written: a saved file's stale copy would reset the
-device clock.
+device clock. `REP` is skipped for the opposite reason — the scale keeps its
+sale log there (`REP`/`RES`/`REE` records) and a write clears it instead of
+storing the rows, so uploads and dry runs leave it alone.
 
 Discovery and file assembly both live in the Rust `ScaleTransport` in
 `src/lib.rs` (`discover`, `fetch_section`, `retrieve`).
