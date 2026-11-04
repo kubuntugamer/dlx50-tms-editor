@@ -20,6 +20,17 @@ fail=0
 ok()   { echo "ok  : $1"; }
 bad()  { echo "FAIL: $1"; fail=1; }
 
+# Barcode strings from --list BAR, read out of whichever column the header
+# labels "Barcode data". The BAR table's width is derived from the rows (it
+# shows every field of the row), so a hard-coded field number goes stale as
+# soon as the table gains a column - which is exactly what happened when the
+# blank field and the flags became visible.
+bar_barcodes() {
+  "$E" "$1" --list BAR $N | awk -F'\t' '
+    NR==1 { for (i=1;i<=NF;i++) if ($i=="Barcode data") c=i; next }
+    c { print $c }'
+}
+
 if [ -n "$REF" ]; then
   cp "$REF" "$WORK/ref.TMS"
 else
@@ -51,8 +62,8 @@ cmp -s "$WORK/ref.TMS" "$WORK/plu.TMS" && ok "PLU add+delete is byte-identical" 
 # 2) BAR add shows the barcode string in the barcode column.
 cp "$WORK/ref.TMS" "$WORK/bar.TMS"
 "$E" "$WORK/bar.TMS" --add BAR 10 "" "B201E500L500A000A000A999" $N >/dev/null || bad "BAR add exit"
-"$E" "$WORK/bar.TMS" --list BAR $N | tail -1 | grep -q $'^10\tB201E500L500A000A000A999$' \
-  && ok "BAR add: barcode shown in Barcode data column" || bad "BAR barcode not in column 2"
+bar_barcodes "$WORK/bar.TMS" | tail -1 | grep -q '^B201E500L500A000A000A999$' \
+  && ok "BAR add: barcode shown in Barcode data column" || bad "BAR barcode not in the Barcode data column"
 grep -q $'^BAR\t10\t\t0\t0\t0\t0\tB201E500L500A000A000A999\t' "$WORK/bar.TMS" \
   && ok "BAR add: stored in the file's BAR layout" || bad "BAR row not in file layout"
 
@@ -138,7 +149,7 @@ printf 'END\tECS\t\r\n'                              >> "$WORK/layoutB.TMS"
 
 cp "$WORK/layoutB.TMS" "$WORK/lb.TMS"
 "$E" "$WORK/lb.TMS" --list BAR $N >/dev/null || bad "layout B: list BAR exit"
-"$E" "$WORK/lb.TMS" --list BAR $N | tail -1 | cut -f2 | grep -q '^B001L001A000A000A000$' \
+bar_barcodes "$WORK/lb.TMS" | tail -1 | grep -q '^B001L001A000A000A000$' \
   && ok "layout B: barcode shown in Barcode data column" || bad "layout B: barcode column empty"
 cmp -s "$WORK/layoutB.TMS" "$WORK/lb.TMS" && ok "layout B: --list leaves the file unchanged" || bad "layout B: --list modified the file"
 "$E" "$WORK/lb.TMS" --add BAR 3 "" "B002L002A000A000A000" $N >/dev/null || bad "layout B: add BAR exit"
