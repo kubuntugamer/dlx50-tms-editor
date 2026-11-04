@@ -105,18 +105,42 @@ jobs:
             ./target/release/dlx50-tms-editor &
             PID=$!
             trap "kill $PID 2>/dev/null || true" EXIT
+            WID=""
+            TITLE=""
             for i in $(seq 1 20); do
               WID=$(xdotool search --pid "$PID" 2>/dev/null | head -1 || true)
               if [ -n "$WID" ]; then
                 TITLE=$(xdotool getwindowname "$WID")
                 echo "Window is up: $TITLE"
-                case "$TITLE" in "TMS / DLX-50-style Editor") exit 0 ;; esac
+                case "$TITLE" in "TMS / DLX-50-style Editor") break ;; esac
               fi
               kill -0 "$PID"
               sleep 1
             done
-            echo "GUI did not create its expected X11 window" >&2
-            exit 1
+            if [ "$TITLE" != "TMS / DLX-50-style Editor" ]; then
+              echo "GUI did not create its expected X11 window" >&2
+              exit 1
+            fi
+            sleep 2
+            # The File menu has to offer a way out. Sweep its rows from the bottom
+            # up: the lowest row is Quit, so the Open and Save As entries that pop
+            # up file dialogs are never reached, and nothing depends on this
+            # runner matching the row height of a developer machine.
+            for Y in $(seq 210 -4 20); do
+              if ! kill -0 "$PID" 2>/dev/null; then
+                echo "Quit closed the app on the row at y=$Y"
+                exit 0
+              fi
+              xdotool mousemove 25 13 click 1
+              sleep 0.4
+              xdotool mousemove 90 "$Y" click 1
+              sleep 0.6
+            done
+            if kill -0 "$PID" 2>/dev/null; then
+              echo "The File menu has no working Quit entry" >&2
+              exit 1
+            fi
+            echo "Quit closed the app"
           '
       - name: Build Debian package
         run: |
