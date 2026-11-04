@@ -2,8 +2,8 @@
 
 A cross-platform Rust desktop editor and CLI for DETECTO `.TMS` scale files.
 The desktop UI uses egui/eframe; the application has no Qt/KDE runtime or
-build dependency. It reads and edits PLU, DPT, CLS, UNT, BAR, TMS, TMR, INF,
-TMT, REP, and SCP sections.
+build dependency. It reads and edits PLU, DPT, CLS, UNT, BAR, LAB, SAL, TMS,
+TMR, INF, TMT, REP, SCF, SCP, and BMP sections.
 
 ## File-format compatibility
 

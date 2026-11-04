@@ -8,7 +8,8 @@ pub mod ui;
 pub mod updater;
 
 pub const SECTIONS: &[&str] = &[
-    "PLU", "DPT", "CLS", "UNT", "BAR", "TMS", "TMR", "INF", "TMT", "REP", "SCP",
+    "PLU", "DPT", "CLS", "UNT", "BAR", "LAB", "SAL", "TMS", "TMR", "INF", "TMT", "REP",
+    "SCF", "SCP", "BMP",
 ];
 const REBUILT_TAGS: &[&str] = &[
     "PLU", "DPT", "CLS", "UNT", "BAR", "LAB", "SAL", "REP", "SCF", "SCP", "TMS", "TMT", "TMR",
@@ -127,12 +128,33 @@ fn barcode_idx(tokens: &[String], offset: usize) -> usize {
 fn default_cols(tag: &str) -> usize {
     match tag {
         "PLU" => 5,
-        "DPT" | "CLS" | "BAR" | "TMS" | "INF" | "TMT" | "REP" => 2,
+        // BAR and the field-by-field sections take their width from the rows.
+        "DPT" | "CLS" | "TMS" | "INF" | "TMT" | "REP" => 2,
         "UNT" | "SCP" => 3,
         "TMR" => 1,
         _ => 1,
     }
 }
+/// Sections shown field by field, with no per-section column map. A `LAB` block
+/// mixes record types (`LAB` header rows and `LAS` layout rows), and the meaning
+/// of the fields in these sections is not documented, so the table shows every
+/// field a row carries instead of guessing which two of them matter.
+fn raw_section(tag: &str) -> bool {
+    matches!(tag, "LAB" | "SAL" | "SCF" | "BMP")
+}
+
+/// How many columns a row exposes. `BAR` and the field-by-field sections are as
+/// wide as the row itself; the rest have a fixed column map.
+fn row_cols(tag: &str, row: &Row) -> usize {
+    if raw_section(tag) {
+        row.tokens.len().max(1)
+    } else if tag == "BAR" {
+        row.tokens.len().saturating_sub(row.offset).max(1)
+    } else {
+        default_cols(tag)
+    }
+}
+
 pub fn headers(tag: &str) -> &'static [&'static str] {
     match tag {
         "PLU" => &[
@@ -155,10 +177,53 @@ pub fn headers(tag: &str) -> &'static [&'static str] {
         _ => &["Column"],
     }
 }
+/// The header row for a section table, sized to the widest row. `BAR` and the
+/// field-by-field sections label the columns they actually have.
+fn section_header(tag: &str, rows: &[Row], width: usize) -> Vec<String> {
+    if tag == "BAR" {
+        let base = rows.first().map_or(1, |r| r.offset);
+        let barcode_col = rows
+            .iter()
+            .find_map(|r| r.special_idx.map(|i| i.saturating_sub(r.offset)));
+        (0..width)
+            .map(|i| {
+                if i == 0 {
+                    "Barcode #".to_owned()
+                } else if Some(i) == barcode_col {
+                    "Barcode data".to_owned()
+                } else {
+                    format!("Field {}", base + i)
+                }
+            })
+            .collect()
+    } else if raw_section(tag) {
+        (0..width)
+            .map(|i| {
+                if i == 0 {
+                    "Record".to_owned()
+                } else {
+                    format!("Field {i}")
+                }
+            })
+            .collect()
+    } else {
+        let fixed = headers(tag);
+        (0..width)
+            .map(|i| {
+                fixed
+                    .get(i)
+                    .map_or_else(|| format!("Field {}", i + 1), |h| (*h).to_owned())
+            })
+            .collect()
+    }
+}
+
 fn display_row(tag: &str, row: &Row) -> Vec<String> {
     let t = &row.tokens;
     let o = row.offset;
-    if tag == "PLU" {
+    if raw_section(tag) {
+        t.clone()
+    } else if tag == "PLU" {
         let ni = row.special_idx;
         let name = ni
             .map(|i| t[i].clone())
@@ -184,11 +249,9 @@ fn display_row(tag: &str, row: &Row) -> Vec<String> {
             rest,
         ]
     } else if tag == "BAR" {
-        let bi = row.special_idx.unwrap_or_else(|| barcode_idx(t, o));
-        vec![
-            t.get(o).cloned().unwrap_or_default(),
-            t.get(bi).cloned().unwrap_or_default(),
-        ]
+        // Every field of the definition — the index, the flag fields and the
+        // B…L…A… template — not just the number and the template.
+        t.get(o..).unwrap_or_default().to_vec()
     } else {
         (0..default_cols(tag))
             .map(|i| t.get(o + i).cloned().unwrap_or_default())
@@ -229,8 +292,18 @@ impl Editor {
         let s = self
             .section(tag)
             .ok_or_else(|| EditError::Usage(format!("no such section: {tag}")))?;
-        let mut out = vec![headers(tag).iter().map(|s| (*s).to_owned()).collect()];
-        out.extend(s.rows.iter().map(|r| display_row(tag, r)));
+        let shown: Vec<Vec<String>> = s.rows.iter().map(|r| display_row(tag, r)).collect();
+        let width = shown
+            .iter()
+            .map(Vec::len)
+            .max()
+            .unwrap_or(0)
+            .max(headers(tag).len());
+        let mut out = vec![section_header(tag, &s.rows, width)];
+        out.extend(shown.into_iter().map(|mut cells| {
+            cells.resize(width, String::new());
+            cells
+        }));
         Ok(out)
     }
     pub fn add(
@@ -248,6 +321,8 @@ impl Editor {
             (last.tokens.clone(), last.offset)
         } else if tag == "PLU" {
             return Err(EditError::Operation("PLU has no rows to clone and cannot be bootstrapped — open a file that already has PLU entries".into()));
+        } else if raw_section(tag) {
+            (vec![tag.to_owned(), String::new()], 1)
         } else {
             (vec![tag.into(), "0".into()], 1)
         };
@@ -270,7 +345,15 @@ impl Editor {
         } else {
             None
         };
-        if tag == "PLU" {
+        if raw_section(tag) {
+            // There is no column map to fill in for these rows, so refuse to
+            // invent one instead of writing values into arbitrary fields.
+            if !number.is_empty() || !code.is_empty() || !name.is_empty() || !price.is_empty() {
+                return Err(EditError::Operation(format!(
+                    "{tag} rows are shown field by field because their layout is not documented, so a new row cannot be filled in from a number/code/name/price — add the row, then edit it in the table"
+                )));
+            }
+        } else if tag == "PLU" {
             let ni = si.unwrap_or_else(|| {
                 row.insert(offset + 1, "NEW PRODUCT".into());
                 offset + 1
@@ -341,11 +424,10 @@ impl Editor {
         let count = s.rows.len();
         let r = s.rows.get_mut(row).ok_or_else(|| {
             EditError::Operation(format!(
-                "cell {row},{col} is outside the {tag} table ({count} rows, {} columns)",
-                default_cols(tag)
+                "cell {row},{col} is outside the {tag} table ({count} rows)"
             ))
         })?;
-        let cols = default_cols(tag);
+        let cols = row_cols(tag, r);
         if col >= cols {
             return Err(EditError::Operation(format!(
                 "cell {row},{col} is outside the {tag} table ({count} rows, {cols} columns)"
@@ -372,16 +454,8 @@ impl Editor {
                     }
                 }
             }
-        } else if tag == "BAR" {
-            let idx = if col == 0 { Some(o) } else { r.special_idx };
-            if let Some(i) = idx {
-                if i >= r.tokens.len() {
-                    r.tokens.resize(i + 1, String::new());
-                }
-                r.tokens[i] = value.into();
-            }
         } else {
-            let idx = o + col;
+            let idx = if raw_section(tag) { col } else { o + col };
             if idx >= r.tokens.len() {
                 r.tokens.resize(idx + 1, String::new());
             }
@@ -659,9 +733,7 @@ pub fn section_rows(file: &[u8], tag: &str) -> Vec<u8> {
 }
 
 /// Sections whose value belongs to the device, not to a saved file, so uploads
-/// skip them and the read-back ignores them. `TIM` is the scale's running clock
-/// (yy mm dd hh mm ss): writing a file's stale copy back would reset it. `REP`
-/// is the sale log: the scale clears it on a write instead of storing the rows.
+/// skip them and the read-back ignores them.
 pub const VOLATILE_SECTIONS: &[&str] = &["TIM", "REP"];
 
 /// One read-only section request: "UPL\t<TAG>\t\r\n".
@@ -1391,6 +1463,42 @@ mod tests {
         assert_eq!(Editor::from_bytes(&b).unwrap().serialize().as_bytes(), b);
     }
     #[test]
+    fn bar_tab_shows_every_field_of_the_row() {
+        let mut e = Editor::from_bytes(&fixture_a()).unwrap();
+        let rows = e.list("BAR").unwrap();
+        // "BAR\t1\t\t0\t0\t0\t0\t<template>\t" — the tag is the marker, the
+        // remaining eight fields are the columns.
+        assert_eq!(rows[0].len(), 8);
+        assert_eq!(rows[1].len(), 8);
+        assert_eq!(rows[0][6], "Barcode data");
+        assert_eq!(rows[1][3], "0");
+        // A flag field that used to be invisible is writable, and the write lands
+        // in the row itself, not in the barcode template.
+        e.set("BAR", 0, 3, "7").unwrap();
+        assert_eq!(e.list("BAR").unwrap()[1][3], "7");
+        assert!(e
+            .serialize()
+            .contains("BAR\t1\t\t0\t7\t0\t0\tB201E500L500A000A000A001"));
+    }
+    #[test]
+    fn lab_sal_scf_bmp_have_tabs_and_show_mixed_rows() {
+        for tag in ["LAB", "SAL", "SCF", "BMP"] {
+            assert!(SECTIONS.contains(&tag), "{tag} has no editor tab");
+        }
+        let bytes = b"HEADER\tDLX50\r\nDWL\tLAB\t\r\nLAB\t1\t\t1\t58\t40\tPrice\tNet WT\t\r\nLAS\t0\t0\t0\t1\t0\t\r\nEND\tLAB\t\r\n\r\nDWL\tSCF\t\r\nEND\tSCF\t\r\n\r\nEND\tECS\t\r\n".to_vec();
+        let mut e = Editor::from_bytes(&bytes).unwrap();
+        let rows = e.list("LAB").unwrap();
+        assert_eq!(rows[0][0], "Record");
+        assert_eq!(rows[1][0], "LAB");
+        assert_eq!(rows[2][0], "LAS");
+        assert_eq!(rows[1][2], "");
+        assert_eq!(rows[2].len(), rows[1].len(), "rows are padded to one width");
+        // The LAS layout row's fields are visible and editable too.
+        e.set("LAB", 1, 2, "9").unwrap();
+        assert_eq!(e.list("LAB").unwrap()[2][2], "9");
+        assert_eq!(e.list("SCF").unwrap().len(), 1, "an empty section shows only its header");
+    }
+    #[test]
     fn plu_edit_and_delete_roundtrip() {
         let b = fixture_a();
         let mut e = Editor::from_bytes(&b).unwrap();
@@ -1404,7 +1512,12 @@ mod tests {
         let b=b"DWL\tPLU\t\r\nPLU\t1\tWidget Alpha\t1\t0\t0\t0\t0\t0\t\r\nEND\tPLU\t\r\nDWL\tBAR\t\r\nBAR\t1\t0\t0\t0\t0\tB000L000A000A000A000\t\r\nEND\tBAR\t\r\nEND\tECS\t\r\n";
         let e = Editor::from_bytes(b).unwrap();
         assert_eq!(e.list("PLU").unwrap()[1][2], "Widget Alpha");
-        assert_eq!(e.list("BAR").unwrap()[1][1], "B000L000A000A000A000");
+        let bar = e.list("BAR").unwrap();
+        let data = bar[0]
+            .iter()
+            .position(|h| h == "Barcode data")
+            .expect("BAR has a Barcode data column");
+        assert_eq!(bar[1][data], "B000L000A000A000A000");
         assert_eq!(e.list("DPT").unwrap().len(), 1);
         assert_eq!(e.serialize().as_bytes(), b);
     }
@@ -1413,7 +1526,12 @@ mod tests {
         let b = b"DWL\tBAR\t\r\nEND\tBAR\t\r\nEND\tECS\t\r\n";
         let mut e = Editor::from_bytes(b).unwrap();
         e.add("BAR", "2", "", "B001L001A000A000A000", "").unwrap();
-        assert_eq!(e.list("BAR").unwrap()[1][1], "B001L001A000A000A000");
+        let bar = e.list("BAR").unwrap();
+        let data = bar[0]
+            .iter()
+            .position(|h| h == "Barcode data")
+            .expect("BAR has a Barcode data column");
+        assert_eq!(bar[1][data], "B001L001A000A000A000");
     }
     #[test]
     fn versions_and_checksum() {
