@@ -20,7 +20,8 @@ PLU schemas.
 ## Desktop app
 
 - Open, edit, add and delete rows across section tabs.
-- **Ctrl+S** saves in place after making a `.BAK`; **Ctrl+Shift+S** opens Save As.
+- **Ctrl+O** opens a file; **Ctrl+S** saves in place after making a `.BAK`;
+  **Ctrl+Shift+S** opens Save As; **Ctrl+Q** quits.
 - `--scale-live OUT.TMS` retrieves the first scale heard over the LAN into
   OUT.TMS: UDP beacon discovery, then every section fetched in device order and
   assembled behind the ECS header and footer.
