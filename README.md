@@ -49,6 +49,7 @@ open a window or perform update checks.
 dlx50-tms-editor FILE.TMS --list PLU
 dlx50-tms-editor FILE.TMS --add PLU 9 4099 "Beef Tendon"
 dlx50-tms-editor FILE.TMS --add PLU --csv items.csv --price 799,2
+dlx50-tms-editor FILE.TMS --add PLU --csv priced.csv   # code,name,price per row
 dlx50-tms-editor FILE.TMS --add DPT 9 "New Department"
 dlx50-tms-editor FILE.TMS --delete PLU 4099
 dlx50-tms-editor FILE.TMS --set PLU 0 2 "Edited Name"
@@ -65,7 +66,20 @@ dlx50-tms-editor --scale-clock               # set the scale's clock from this c
 options: `--version`, `--help`, `--no-update-check`.
 
 CSV rows are `code,name` (or `code,value` for other sections); a first-line
-header is optional.
+header is optional. For `--add PLU` a third column may carry that row's price,
+which overrides `--price`:
+
+```csv
+code,name,price
+5001,Bitter Melon,199,2
+5002,Okra,299,2
+```
+
+Prices use the stored shape `cents,'2'` — `799,2` is $7.99, because the field
+holds cents, not dollars. Bare digits are read as cents (`149` becomes
+`149,2`), and anything else, including `7.99`, is refused rather than guessed
+at: a price read as dollars would overcharge by 100x. A row whose price cell is
+empty keeps the cloned price of the last row, as before.
 
 ## Distribution
 

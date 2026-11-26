@@ -115,6 +115,37 @@ printf 'code,name\n5001,Csv Item\n' > "$WORK/items.csv"
 "$E" "$WORK/csvprice.TMS" --list PLU $N | tail -1 | cut -f4 | grep -q '^55,5$' \
   && ok "--add --csv --price: price stored" || bad "--add --csv --price not stored"
 
+# 9b2) --csv may carry a price column, so a bulk import can price each row.
+#      Without it every row silently inherited the last row's price.
+cp "$WORK/ref.TMS" "$WORK/csvcol.TMS"
+printf 'code,name,price\n5001,First Item,149,2\n5002,Second Item,89,2\n' > "$WORK/col.csv"
+"$E" "$WORK/csvcol.TMS" --add PLU --csv "$WORK/col.csv" $N >/dev/null || bad "--csv price column exit"
+"$E" "$WORK/csvcol.TMS" --list PLU $N | tail -2 > "$WORK/cols.txt"
+sed -n 1p "$WORK/cols.txt" | cut -f4 | grep -q '^149,2$' \
+  && ok "--csv price column: first row priced 149,2" || bad "--csv price column: first row price wrong"
+sed -n 2p "$WORK/cols.txt" | cut -f4 | grep -q '^89,2$' \
+  && ok "--csv price column: second row priced 89,2" || bad "--csv price column: second row price wrong"
+
+# 9b3) A per-row price beats the global --price.
+cp "$WORK/ref.TMS" "$WORK/csvwin.TMS"
+printf 'code,name,price\n5001,Row Wins,149,2\n' > "$WORK/win.csv"
+"$E" "$WORK/csvwin.TMS" --add PLU --csv "$WORK/win.csv" --price 55,5 $N >/dev/null || bad "--csv per-row override exit"
+"$E" "$WORK/csvwin.TMS" --list PLU $N | tail -1 | cut -f4 | grep -q '^149,2$' \
+  && ok "--csv per-row price overrides --price" || bad "--csv per-row price did not override --price"
+
+# 9b4) A price written like money (7.99) is refused, not guessed at, and the
+#      file is left untouched — reading it as cents would misprice the item.
+cp "$WORK/ref.TMS" "$WORK/csvbad.TMS"
+printf 'code,name,price\n5001,Dollars Item,7.99\n' > "$WORK/bad.csv"
+if "$E" "$WORK/csvbad.TMS" --add PLU --csv "$WORK/bad.csv" $N > /dev/null 2> "$WORK/err.txt"; then
+  bad "--csv with a dollar-shaped price should have failed"
+else
+  grep -q 'cents' "$WORK/err.txt" \
+    && ok "--csv dollar-shaped price refused with a cents hint" || bad "--csv refusal message unclear"
+fi
+cmp -s "$WORK/ref.TMS" "$WORK/csvbad.TMS" \
+  && ok "--csv refused price left the file unchanged" || bad "--csv refused price still wrote to the file"
+
 # 9c) A PLU added with no explicit code gets the next free code automatically.
 #     The item code is the first half of the label barcode (2 + code +
 #     total x 1000), so leaving it blank printed labels with no barcode.

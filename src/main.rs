@@ -9,7 +9,7 @@ use tms_editor::{
 const VERSION: &str = env!("TMS_APP_VERSION");
 
 fn usage() {
-    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE\n      bulk add: each line 'CODE,NAME' (header line skipped)\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends a read-only UPL request and reports\n      what the scale answers (no write/delete/reboot/transfer sent)\n  dlx50-tms-editor --scale-live OUT.TMS\n      retrieve the first scale heard over the LAN into OUT.TMS (read-only;\n      exits 3 if no scale beacon is heard or a section fails)\n  dlx50-tms-editor --scale-upload FILE.TMS --allow-write\n      push every section of FILE.TMS to the first scale heard, then read each\n      section back and compare. Writing needs --allow-write; the framing is\n      not vendor-confirmed, so check the read-back result before trusting it\n  dlx50-tms-editor --scale-upload FILE.TMS --dry-run\n      report which sections of FILE.TMS differ from the scale's live\n      configuration -- writes nothing and needs no --allow-write\n  dlx50-tms-editor --scale-clock\n      set the scale's clock to this computer's local time (the device RTC\n      drifts on its own, so this is maintenance, not part of a transfer)\n  --version | --no-update-check | --help");
+    println!("Usage:\n  dlx50-tms-editor FILE.TMS                     open the GUI\n  dlx50-tms-editor FILE.TMS --list TAG          print rows to stdout\n  dlx50-tms-editor FILE.TMS --add TAG [NUMBER] [CODE] [NAME]\n      add one row (clone of the last, auto-numbered). PLU: NUMBER = PLU #, CODE = product code, NAME = product name.\n      PLU may also take --price VALUE (stored price, e.g. 799,2)\n  dlx50-tms-editor FILE.TMS --add TAG --csv FILE [--price VALUE]\n      bulk add: each line 'CODE,NAME[,PRICE]' (header line skipped)\n      PRICE is per row and overrides --price; without either, the row keeps the\n      cloned price of the last row. Stored shape is cents,'2' (799,2 = $7.99);\n      bare digits are read as cents (149 -> 149,2).\n  dlx50-tms-editor FILE.TMS --delete TAG CODE\n  dlx50-tms-editor FILE.TMS --set TAG ROW COL VALUE\n  dlx50-tms-editor FILE.TMS --delete-row TAG ROW\n  add --save-as PATH to write the result to PATH instead of FILE\n  dlx50-tms-editor --probe-scale HOST PORT [TIMEOUT_MS]\n      read-only network probe: sends a read-only UPL request and reports\n      what the scale answers (no write/delete/reboot/transfer sent)\n  dlx50-tms-editor --scale-live OUT.TMS\n      retrieve the first scale heard over the LAN into OUT.TMS (read-only;\n      exits 3 if no scale beacon is heard or a section fails)\n  dlx50-tms-editor --scale-upload FILE.TMS --allow-write\n      push every section of FILE.TMS to the first scale heard, then read each\n      section back and compare. Writing needs --allow-write; the framing is\n      not vendor-confirmed, so check the read-back result before trusting it\n  dlx50-tms-editor --scale-upload FILE.TMS --dry-run\n      report which sections of FILE.TMS differ from the scale's live\n      configuration -- writes nothing and needs no --allow-write\n  dlx50-tms-editor --scale-clock\n      set the scale's clock to this computer's local time (the device RTC\n      drifts on its own, so this is maintenance, not part of a transfer)\n  --version | --no-update-check | --help");
 }
 #[derive(Default)]
 struct Args {
@@ -199,7 +199,38 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
     }
     Ok(out)
 }
-fn csv_rows(path: &PathBuf) -> Result<Vec<(String, String)>, EditError> {
+/// Normalise a price cell to the stored shape `cents,'2'`.
+///
+/// The file stores `799,2` for $7.99, so a bare `149` means 149 cents and is
+/// expanded to `149,2`. Anything else is refused rather than guessed: a price
+/// read as dollars instead of cents is a 100x overcharge that the scale would
+/// happily print.
+fn normalize_price(raw: &str) -> Result<Option<String>, String> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    if let Some((cents, places)) = v.split_once(',') {
+        let digits_ok = !cents.is_empty()
+            && cents.chars().all(|c| c.is_ascii_digit())
+            && !places.is_empty()
+            && places.chars().all(|c| c.is_ascii_digit());
+        if !digits_ok {
+            return Err(format!(
+                "price '{v}' is not the stored shape cents,'2' (e.g. 799,2)"
+            ));
+        }
+        return Ok(Some(v.to_owned()));
+    }
+    if v.chars().all(|c| c.is_ascii_digit()) {
+        return Ok(Some(format!("{v},2")));
+    }
+    Err(format!(
+        "price '{v}' is not the stored shape cents,'2' (e.g. 799,2)"
+    ))
+}
+
+fn csv_rows(path: &PathBuf) -> Result<Vec<(String, String, Option<String>)>, EditError> {
     let text = fs::read_to_string(path).map_err(EditError::Io)?;
     let mut rows = Vec::new();
     for (n, line) in text.lines().enumerate() {
@@ -214,9 +245,12 @@ fn csv_rows(path: &PathBuf) -> Result<Vec<(String, String)>, EditError> {
         {
             continue;
         }
+        let price = normalize_price(cells.get(2).map(String::as_str).unwrap_or(""))
+            .map_err(|e| EditError::Usage(format!("csv line {}: {e}", n + 1)))?;
         rows.push((
             cells.first().cloned().unwrap_or_default(),
             cells.get(1).cloned().unwrap_or_default(),
+            price,
         ));
     }
     Ok(rows)
@@ -604,19 +638,18 @@ fn run(args: Vec<String>) -> i32 {
         if let Some(csv) = &parsed.csv {
             match csv_rows(csv) {
                 Ok(rows) => {
-                    for (code, name) in rows {
+                    for (code, name, row_price) in rows {
                         if parsed.tag == "PLU" && !code.is_empty() { /* code supported only on layout A; core reports layout errors. */
                         }
+                        // Per-row price wins; then a global --price; otherwise the
+                        // price is left as cloned from the last row.
+                        let price = row_price.as_deref().unwrap_or(parsed.price.as_str());
                         match editor.add(
                             &parsed.tag,
                             "",
                             &code,
                             &name,
-                            if parsed.tag == "PLU" {
-                                &parsed.price
-                            } else {
-                                ""
-                            },
+                            if parsed.tag == "PLU" { price } else { "" },
                         ) {
                             Ok(()) => success += 1,
                             Err(e) => {
@@ -627,7 +660,7 @@ fn run(args: Vec<String>) -> i32 {
                     }
                 }
                 Err(e) => {
-                    eprintln!("error: cannot open csv {}: {e}", csv.display());
+                    eprintln!("error: csv {}: {e}", csv.display());
                     return 3;
                 }
             }
@@ -725,4 +758,38 @@ fn launch_gui(path: Option<PathBuf>) -> i32 {
 }
 fn main() {
     std::process::exit(run(env::args().skip(1).collect()));
+}
+
+#[cfg(test)]
+mod price_tests {
+    use super::normalize_price;
+
+    #[test]
+    fn stored_shape_is_kept_verbatim() {
+        assert_eq!(normalize_price("799,2").unwrap().as_deref(), Some("799,2"));
+        assert_eq!(normalize_price("149,2").unwrap().as_deref(), Some("149,2"));
+        assert_eq!(normalize_price("0,0").unwrap().as_deref(), Some("0,0"));
+    }
+
+    #[test]
+    fn bare_digits_are_cents() {
+        assert_eq!(normalize_price("149").unwrap().as_deref(), Some("149,2"));
+        assert_eq!(normalize_price(" 7 ").unwrap().as_deref(), Some("7,2"));
+    }
+
+    #[test]
+    fn blank_means_inherit() {
+        assert_eq!(normalize_price("").unwrap(), None);
+        assert_eq!(normalize_price("   ").unwrap(), None);
+    }
+
+    #[test]
+    fn dollars_are_refused_not_guessed() {
+        // "7.99" is what a person types; reading it as cents would be wrong, so
+        // it must fail loudly rather than become a $799 or $7.99 ambiguity.
+        assert!(normalize_price("7.99").is_err());
+        assert!(normalize_price("$7.99").is_err());
+        assert!(normalize_price(",-1").is_err());
+        assert!(normalize_price("-149,2").is_err());
+    }
 }
