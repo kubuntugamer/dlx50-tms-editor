@@ -25,6 +25,16 @@ bad()  { echo "FAIL: $1"; fail=1; }
 # shows every field of the row), so a hard-coded field number goes stale as
 # soon as the table gains a column - which is exactly what happened when the
 # blank field and the flags became visible.
+# The next code the file does not use yet, taken from --list PLU's code column.
+# Hard-coding a literal code (4099) worked only against the synthetic fixture:
+# with a real scale file that code already belongs to an existing product, so
+# --add appended a second row carrying it and --delete removed both, leaving the
+# copy missing a row the test never created and failing a byte-identical
+# assertion for a misleading reason.
+free_code() {
+  "$E" "$1" --list PLU $N | awk -F'\t' 'NR>1 && $2 ~ /^[0-9]+$/ { if ($2+0 > m) m=$2+0 } END { print m+1 }'
+}
+
 bar_barcodes() {
   "$E" "$1" --list BAR $N | awk -F'\t' '
     NR==1 { for (i=1;i<=NF;i++) if ($i=="Barcode data") c=i; next }
@@ -52,11 +62,16 @@ else
   printf 'END\tECS\t\r\n'                            >> "$WORK/ref.TMS"
 fi
 
-# 1) PLU add then delete returns the file to byte-identical state.
+# 1) PLU add then delete returns the file to byte-identical state. The code is
+#    derived from the file, not hard-coded, so this also holds when the optional
+#    reference file already uses the literal the fixture used to assume.
 cp "$WORK/ref.TMS" "$WORK/plu.TMS"
-"$E" "$WORK/plu.TMS" --add PLU 9 4099 "Beef Tendon" $N >/dev/null || bad "PLU add exit"
-"$E" "$WORK/plu.TMS" --list PLU $N | grep -q "4099" && ok "PLU add visible in --list" || bad "PLU add not in --list"
-"$E" "$WORK/plu.TMS" --delete PLU 4099 $N >/dev/null || bad "PLU delete exit"
+NEWCODE=$(free_code "$WORK/plu.TMS")
+[ -n "$NEWCODE" ] || bad "could not derive a free PLU code from the file"
+"$E" "$WORK/plu.TMS" --add PLU 9 "$NEWCODE" "Beef Tendon" $N >/dev/null || bad "PLU add exit"
+"$E" "$WORK/plu.TMS" --list PLU $N | awk -F'\t' -v c="$NEWCODE" '$2==c{found=1} END{exit !found}' \
+  && ok "PLU add visible in --list" || bad "PLU add not in --list"
+"$E" "$WORK/plu.TMS" --delete PLU "$NEWCODE" $N >/dev/null || bad "PLU delete exit"
 cmp -s "$WORK/ref.TMS" "$WORK/plu.TMS" && ok "PLU add+delete is byte-identical" || bad "PLU add+delete changed the file"
 
 # 2) BAR add shows the barcode string in the barcode column.
@@ -150,10 +165,11 @@ cmp -s "$WORK/ref.TMS" "$WORK/csvbad.TMS" \
 #     The item code is the first half of the label barcode (2 + code +
 #     total x 1000), so leaving it blank printed labels with no barcode.
 cp "$WORK/ref.TMS" "$WORK/autocode.TMS"
+EXPECT=$(free_code "$WORK/autocode.TMS")
 "$E" "$WORK/autocode.TMS" --add PLU 9 "" "Codeless Item" $N >/dev/null || bad "add without code exit"
-"$E" "$WORK/autocode.TMS" --list PLU $N | tail -1 | cut -f2 | grep -q '^1002$' \
-  && ok "PLU add without a code gets the next free code (1002)" || bad "PLU add without a code left it blank or wrong"
-"$E" "$WORK/autocode.TMS" --delete PLU 1002 $N >/dev/null || bad "autocode: delete exit"
+"$E" "$WORK/autocode.TMS" --list PLU $N | tail -1 | cut -f2 | grep -qx "$EXPECT" \
+  && ok "PLU add without a code gets the next free code ($EXPECT)" || bad "PLU add without a code left it blank or wrong"
+"$E" "$WORK/autocode.TMS" --delete PLU "$EXPECT" $N >/dev/null || bad "autocode: delete exit"
 cmp -s "$WORK/ref.TMS" "$WORK/autocode.TMS" \
   && ok "autocode: add+delete is byte-identical" || bad "autocode: add+delete changed the file"
 
